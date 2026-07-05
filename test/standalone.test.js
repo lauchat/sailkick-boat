@@ -45,7 +45,7 @@ test('standalone mirror: serves app root + root-relative assets, caches, offline
   assert.strictEqual(up.hits(), 2, 'root + asset fetched once each; repeat from cache')
 
   // offline: kill upstream, cached root still served
-  up.srv.close()
+  up.srv.closeAllConnections && up.srv.closeAllConnections(); up.srv.close()
   const offline = await fetch(base + '/')
   assert.strictEqual(offline.status, 200)
   assert.strictEqual(offline.headers.get('x-sailkick-cache'), 'HIT')

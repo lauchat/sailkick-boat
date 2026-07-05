@@ -49,7 +49,9 @@ module.exports = function (app) {
         properties: {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
           sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors, e.g. http://192.168.5.222:3000' },
-          proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). Publish this port on the SignalK container. 0 = disable.', default: 8080 },
+          proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). With host networking it is directly on the Pi. 0 = disable.', default: 8080 },
+          localSignalkUrl: { type: 'string', title: 'Local SignalK URL (live telemetry)', description: 'Live data + WebSocket stream are proxied here (not cached, not mirrored).', default: 'http://127.0.0.1:3000' },
+          localPaths: { type: 'array', title: 'Paths served by LOCAL SignalK', description: 'Prefixes routed to local SignalK instead of the mirror.', items: { type: 'string' }, default: ['/signalk'] },
           storeDir: { type: 'string', title: 'Cache directory', description: 'Default: plugin data dir. Put on the SSD.' },
           requestTimeoutMs: { type: 'number', title: 'Fetch timeout (ms)', default: 20000 }
         }
