@@ -1,6 +1,6 @@
 {
   "name": "sailkick-boat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Signal K plugin: boat-side sailkick companion — gapless telemetry sync to InfluxDB + offline-first caching mirror of the sailkick host. Two toggleable modules in one plugin.",
   "main": "index.js",
   "scripts": {

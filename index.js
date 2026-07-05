@@ -49,6 +49,7 @@ module.exports = function (app) {
         properties: {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
           sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors, e.g. http://192.168.5.222:3000' },
+          proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). Publish this port on the SignalK container. 0 = disable.', default: 8080 },
           storeDir: { type: 'string', title: 'Cache directory', description: 'Default: plugin data dir. Put on the SSD.' },
           requestTimeoutMs: { type: 'number', title: 'Fetch timeout (ms)', default: 20000 }
         }
