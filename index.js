@@ -2,6 +2,7 @@
 
 const { createSync } = require('./lib/sync')
 const { createProxy } = require('./lib/proxy')
+const { createTelemetry } = require('./lib/telemetry')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
 //   sync : gapless store-and-forward of self telemetry to InfluxDB (data OUT)
@@ -11,6 +12,7 @@ const { createProxy } = require('./lib/proxy')
 module.exports = function (app) {
   let sync = null
   let proxy = null
+  let telemetry = null
   let statusTimer = null
 
   const plugin = {
@@ -48,6 +50,7 @@ module.exports = function (app) {
         title: 'Sailkick caching proxy',
         properties: {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
+          serveTelemetry: { type: 'boolean', title: 'Serve /ws/telemetry from local SignalK', description: 'Provide the app\'s telemetry bus from the boat\'s SignalK, so the app uses the same contract as the cloud server.', default: true },
           sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors, e.g. http://192.168.5.222:3000' },
           proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). With host networking it is directly on the Pi. 0 = disable.', default: 8080 },
           localSignalkUrl: { type: 'string', title: 'Local SignalK URL (live telemetry)', description: 'Live data + WebSocket stream are proxied here (not cached, not mirrored).', default: 'http://127.0.0.1:3000' },
@@ -70,9 +73,20 @@ module.exports = function (app) {
       }
     }
 
-    // --- proxy module ---
+    // --- proxy module (+ /ws/telemetry provider from local SignalK) ---
     if (!opts.proxy || opts.proxy.enabled !== false) {
-      try { proxy = createProxy(app, opts.proxy || {}); proxy.start() } catch (e) {
+      const pOpts = { ...(opts.proxy || {}) }
+      if (pOpts.serveTelemetry !== false) {
+        try {
+          telemetry = createTelemetry(app, {})
+          telemetry.start()
+          pOpts.telemetryUpgrade = (req, s, h) => telemetry.handleUpgrade(req, s, h)
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] telemetry start failed: ' + e.message)
+          telemetry = null
+        }
+      }
+      try { proxy = createProxy(app, pOpts); proxy.start() } catch (e) {
         (app.error || console.error)('[sailkick-boat] proxy start failed: ' + e.message)
         proxy = null
       }
@@ -87,6 +101,7 @@ module.exports = function (app) {
     const parts = []
     if (sync) parts.push(sync.status())
     if (proxy) parts.push(proxy.status())
+    if (telemetry) parts.push(telemetry.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
   }
 
@@ -94,8 +109,10 @@ module.exports = function (app) {
     if (statusTimer) clearInterval(statusTimer)
     statusTimer = null
     try { if (sync) sync.stop() } catch {}
+    try { if (telemetry) telemetry.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
     sync = null
+    telemetry = null
     proxy = null
   }
 
