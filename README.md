@@ -1,12 +1,17 @@
 # sailkick-boat
 
-One Signal K plugin, two independently-toggleable modules — so the boat stays
+One Signal K plugin, independently-toggleable modules — so the boat stays
 "just SignalK + plugins":
 
 - **`sync`** — gapless store-and-forward of self-vessel telemetry to InfluxDB v2
   (durable spool; survives offline + restarts). Data **out**.
 - **`proxy`** — offline-first caching **mirror of the sailkick host**: fetch once
   online, serve from disk forever (incl. offline). Data **in**.
+- served alongside the mirror, from the boat's **own** data (so the app uses the
+  same contracts as the cloud, offline-first):
+  - **`/ws/telemetry`** — the app's live telemetry bus, fed from local SignalK.
+  - **`/api/history/{series,track}`** — the app's Trends panel + track, served
+    from the boat's local InfluxDB (`bandg`) with the full local history.
 
 Kept as separate modules so a proxy fault can't wedge the data-critical sync path.
 
@@ -22,9 +27,27 @@ Open the sailkick app *through* the proxy and every relative URL it loads is
 cached automatically. `POST /plugins/sailkick-boat/prefetch` with
 `{"paths":[...]}` warms a region/app-shell ahead of a passage.
 
-## Config (two sections, each toggleable)
+## Local history (offline Trends + track)
+The sailkick app is deployment-agnostic about history: *central Influx in the
+cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
+**with** a full local InfluxDB — so the proxy serves the app's history endpoints
+straight from `bandg`:
+```
+GET /api/history/series?window=3600s&every=30s -> { series: { sog|heading|tws|… : [[tMs,val],…] } }
+GET /api/history/track?window=3600s            -> { track: [{ t, lat, lon }, …] }
+```
+Same JSON the cloud returns, so the browser can't tell the difference — but it
+works **offline** with the boat's own data. When the history InfluxDB isn't
+configured (no read token), these paths **fall through to the cloud mirror**, so
+an online boat is never worse off than before.
+
+## Config (each section toggleable)
 - **Telemetry sync → InfluxDB**: `enabled`, `influxUrl`, `org`, `bucket`, `token`, `spoolDir`, …
 - **Sailkick caching proxy**: `enabled`, `sailkickUrl` (the one upstream), `storeDir`, …
+  - `serveTelemetry` (default on) — provide `/ws/telemetry` from local SignalK.
+  - **Local history** (default on): `influxUrl` (default `http://127.0.0.1:8086`),
+    `org` (`addiction`), `bucket` (`bandg`), `token` (a read token — required to
+    enable local history).
 
 Point your chart app / browser at:
 `http://<boat>:3000/plugins/sailkick-boat/p/`
