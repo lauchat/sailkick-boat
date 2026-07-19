@@ -53,6 +53,7 @@ module.exports = function (app) {
         properties: {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
           serveTelemetry: { type: 'boolean', title: 'Serve /ws/telemetry from local SignalK', description: 'Provide the app\'s telemetry bus from the boat\'s SignalK, so the app uses the same contract as the cloud server.', default: true },
+          openAccess: { type: 'boolean', title: 'No login on the boat', description: 'Serve /api/config with the cloud login disabled, so the boat\'s own app opens without a password (single-tenant, offline-first). Turn off to keep the cloud login gate.', default: true },
           sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors, e.g. http://192.168.5.222:3000' },
           proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). With host networking it is directly on the Pi. 0 = disable.', default: 8080 },
           localSignalkUrl: { type: 'string', title: 'Local SignalK URL (live telemetry)', description: 'Live data + WebSocket stream are proxied here (not cached, not mirrored).', default: 'http://127.0.0.1:3000' },

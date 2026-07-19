@@ -52,6 +52,16 @@ POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain   # refresh app shell
 POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap  # nuke one tileset
 ```
 
+## No login on the boat (single-tenant)
+The cloud app gates behind a boat-account login (a `Secure` session cookie), which
+can't work over the boat's plain-HTTP offline mirror — the browser drops a `Secure`
+cookie on HTTP, so login just loops. Since the boat is single-tenant and its data
+endpoints aren't server-gated, the proxy serves `/api/config` with `auth.required`
+forced to `false` (and `historyAvailable` forced on when history is served locally),
+so the boat's own app opens with no password, fully offline. Everything else in the
+config passes through untouched. Toggle off with `proxy.openAccess: false` to keep
+the cloud login gate.
+
 ## Local history (offline Trends + track)
 The sailkick app is deployment-agnostic about history: *central Influx in the
 cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
