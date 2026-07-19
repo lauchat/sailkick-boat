@@ -27,6 +27,31 @@ Open the sailkick app *through* the proxy and every relative URL it loads is
 cached automatically. `POST /plugins/sailkick-boat/prefetch` with
 `{"paths":[...]}` warms a region/app-shell ahead of a passage.
 
+## Cache freshness — pinned tiles, auto-refresh on new bakes
+Tiles are **pinned**: once cached they're served from disk forever (online or
+offline), never time-expired — so a big tile store never "goes slow." Freshness
+comes from the cloud **announcing bakes**, not from a clock:
+
+- The cloud publishes a small manifest (default `GET /api/cache-manifest`):
+  ```json
+  { "app": "2026-07-19a",
+    "bakes": { "tiles/osm-standard": "v3", "tiles/seamap": "2026-06", "terrain": "2026-01" } }
+  ```
+- The plugin polls it (only when online; a failed poll is a no-op). When a
+  dataset's id **changes**, files in that family older than the announcement are
+  refreshed **lazily** — refetched on next view when online (`X-Sailkick-Cache:
+  UPDATED`), served stale when offline (`STALE`). Untouched tiles never re-download.
+- First sight of a family does **not** invalidate — your pre-populated store is
+  trusted. Only genuine bake changes refresh anything.
+
+`X-Sailkick-Cache` reports `HIT` / `MISS` / `UPDATED` / `STALE` per response.
+
+Manual force-refresh (no SSH):
+```
+POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain   # refresh app shell, keep tiles
+POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap  # nuke one tileset
+```
+
 ## Local history (offline Trends + track)
 The sailkick app is deployment-agnostic about history: *central Influx in the
 cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
@@ -45,6 +70,9 @@ an online boat is never worse off than before.
 - **Telemetry sync → InfluxDB**: `enabled`, `influxUrl`, `org`, `bucket`, `token`, `spoolDir`, …
 - **Sailkick caching proxy**: `enabled`, `sailkickUrl` (the one upstream), `storeDir`, …
   - `serveTelemetry` (default on) — provide `/ws/telemetry` from local SignalK.
+  - **Cache manifest** (default on): `path` (default `/api/cache-manifest`),
+    `pollIntervalSec` (default 300) — auto-refresh datasets when the cloud
+    announces a new bake.
   - **Local history** (default on): `influxUrl` (default `http://127.0.0.1:8086`),
     `org` (`addiction`), `bucket` (`bandg`), `token` (a read token — required to
     enable local history).

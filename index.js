@@ -59,6 +59,16 @@ module.exports = function (app) {
           localPaths: { type: 'array', title: 'Paths served by LOCAL SignalK', description: 'Prefixes routed to local SignalK instead of the mirror.', items: { type: 'string' }, default: ['/signalk'] },
           storeDir: { type: 'string', title: 'Cache directory', description: 'Default: plugin data dir. Put on the SSD.' },
           requestTimeoutMs: { type: 'number', title: 'Fetch timeout (ms)', default: 20000 },
+          manifest: {
+            type: 'object',
+            title: 'Auto-refresh on new bakes (cache manifest)',
+            description: 'Poll the cloud\'s bake manifest so tiles/app refresh lazily when a dataset is re-baked. Tiles are otherwise pinned (never expire by time).',
+            properties: {
+              enabled: { type: 'boolean', title: 'Poll the cache manifest', default: true },
+              path: { type: 'string', title: 'Manifest path on the sailkick host', default: '/api/cache-manifest' },
+              pollIntervalSec: { type: 'number', title: 'Poll interval (s)', default: 300 }
+            }
+          },
           history: {
             type: 'object',
             title: 'Local history (app Trends panel + track)',
@@ -153,6 +163,10 @@ module.exports = function (app) {
     })
     router.post('/prefetch', (req, res) => {
       if (proxy) proxy.handlePrefetch(req, res)
+      else res.status(503).send('proxy not enabled')
+    })
+    router.post('/cache/clear', (req, res) => {
+      if (proxy) proxy.handleClear(req, res)
       else res.status(503).send('proxy not enabled')
     })
   }

@@ -32,7 +32,8 @@ test('routes /signalk -> local SignalK (HTTP + WebSocket), else -> mirror', asyn
     localSignalkUrl: `http://127.0.0.1:${localPort}`,
     localPaths: ['/signalk'],
     storeDir: store,
-    proxyPort: port
+    proxyPort: port,
+    manifest: { enabled: false }
   })
   proxy.start()
   await new Promise((r) => setTimeout(r, 150))

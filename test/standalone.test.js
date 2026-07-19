@@ -25,7 +25,7 @@ const freePort = () => new Promise((r) => { const s = http.createServer(); s.lis
 test('standalone mirror: serves app root + root-relative assets, caches, offline-serves', async () => {
   const up = await upstream(); const store = tmp(); const port = await freePort()
   const app = { getDataDirPath: () => store, debug: () => {} }
-  const proxy = createProxy(app, { sailkickUrl: up.url, storeDir: store, proxyPort: port })
+  const proxy = createProxy(app, { sailkickUrl: up.url, storeDir: store, proxyPort: port, manifest: { enabled: false } })
   proxy.start()
   await new Promise((r) => setTimeout(r, 150)) // let the server bind
 
