@@ -93,6 +93,28 @@ module.exports = function (app) {
               seabedMaxZoom: { type: 'number', title: 'Seabed (bathy) max zoom', description: 'Dense depth raster z0..N (z6 ≈ 5.5k tiles).', default: 6 },
               concurrency: { type: 'number', title: 'Parallel fetches', default: 4 }
             }
+          },
+          prefetch: {
+            type: 'object',
+            title: 'Offline area download (around the boat)',
+            description: 'On save, cache the detailed chart layers for a radius around the boat\'s current position (from local SignalK), so a passage area is fully offline. Progress shows in the status line above.',
+            properties: {
+              radiusNm: {
+                type: 'number',
+                title: 'Radius around boat',
+                enum: [0, 25, 50, 100, 200],
+                enumNames: ['Off', '25 nm', '50 nm', '100 nm', '200 nm'],
+                default: 0
+              },
+              detailZoom: {
+                type: 'number',
+                title: 'Detail level',
+                enum: [12, 13, 14, 15],
+                enumNames: ['Overview (z12)', 'Coastal (z13)', 'Detailed (z14)', 'Harbor (z15)'],
+                default: 13
+              },
+              concurrency: { type: 'number', title: 'Parallel fetches', default: 4 }
+            }
           }
         }
       }

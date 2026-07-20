@@ -77,7 +77,13 @@ passage area on demand.
   hit cache only) and self-throttling — it reuses the circuit breaker, so it goes quiet
   offline and resumes when back online. Progress shows in the plugin status line.
   Config: `proxy.seed.{enabled,coastlineMaxZoom,seabedMaxZoom,concurrency}`.
-- **Region prefetch** — before a passage, warm the detailed chart layers for your area:
+- **Download around the boat** (settings dropdowns, no token) — the easiest way to
+  cache a passage area: in Plugin Config pick a **Radius around boat** (25/50/100/200 nm)
+  and a **Detail level** (Overview z12 … Harbor z15), then save. The plugin reads the
+  boat's current position from local SignalK, builds a box, and warms the chart layers
+  in the background (progress in the status line). Idempotent; re-saving tops up. An
+  oversized radius+detail is refused (reduce one). Config `proxy.prefetch.{radiusNm,detailZoom,concurrency}`.
+- **Region prefetch (API)** — for scripted/arbitrary boxes, warm the detailed chart layers for an area:
   ```
   POST /plugins/sailkick-boat/prefetch/region
     { "bbox":[w,s,e,n], "minZoom":8, "maxZoom":15,
