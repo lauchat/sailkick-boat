@@ -44,7 +44,20 @@ comes from the cloud **announcing bakes**, not from a clock:
 - First sight of a family does **not** invalidate — your pre-populated store is
   trusted. Only genuine bake changes refresh anything.
 
-`X-Sailkick-Cache` reports `HIT` / `MISS` / `UPDATED` / `STALE` per response.
+`X-Sailkick-Cache` reports `HIT` / `MISS` / `UPDATED` / `STALE` / `LIVE` per response.
+
+**Static vs dynamic — two strategies.** Tiles and app assets are **cache-first**
+(pinned, offline forever). Dynamic `/api/*` data (AIS, weather) is **network-first**:
+fetched live every time online (so AIS/weather never go stale), with the last
+response kept only as an **offline fallback** (`STALE`). Local `/api/history` and the
+patched `/api/config` are served specially (above).
+
+**Offline circuit breaker.** Some boat routers return errors (or hang) for outbound
+requests when the uplink is down, instead of failing cleanly. Once a fetch fails, the
+mirror marks the upstream down for a short cooldown and **fast-fails uncached
+requests** (no per-request timeout hang) — so a handful of uncached tiles can't
+starve the browser's ~6-connection pool and block the cached tiles. Cached `HIT`s are
+never affected; a single success clears the breaker.
 
 Manual force-refresh (no SSH):
 ```
