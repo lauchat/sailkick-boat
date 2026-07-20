@@ -42,7 +42,7 @@ test('serveConfig: disables login + forces historyAvailable when local history i
   const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
   const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: 'http://127.0.0.1:1' }); h.start()
   assert.strictEqual(h.available(), true)
-  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, history: h, storeDir: tmp(), manifest: { enabled: false } })
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, history: h, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
   proxy.start()
 
   const res = await callConfig(proxy)
@@ -59,7 +59,7 @@ test('serveConfig: disables login + forces historyAvailable when local history i
 test('serveConfig: without local history, historyAvailable is left as the cloud reports', async () => {
   const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
   const hoff = createHistory(app, { token: '' }); hoff.start() // not available
-  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, history: hoff, storeDir: tmp(), manifest: { enabled: false } })
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, history: hoff, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
   proxy.start()
 
   const res = await callConfig(proxy)
@@ -73,7 +73,7 @@ test('serveConfig: without local history, historyAvailable is left as the cloud 
 test('serveConfig: serves the cached copy when the cloud is offline (still login-disabled)', async () => {
   const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
   const store = tmp()
-  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, storeDir: store, manifest: { enabled: false } })
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, storeDir: store, manifest: { enabled: false }, seed: { enabled: false } })
   proxy.start()
 
   await callConfig(proxy)                 // warm the cache while "online"

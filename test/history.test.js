@@ -115,7 +115,7 @@ test('proxy: routes /api/history to local history when available, else mirrors',
 
   // history CONFIGURED → served locally
   const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: `http://127.0.0.1:${inPort}` }); h.start()
-  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: h, storeDir: '/tmp/sk-hist-test-store', manifest: { enabled: false } })
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: h, storeDir: '/tmp/sk-hist-test-store', manifest: { enabled: false }, seed: { enabled: false } })
   proxy.start()
   const local = await new Promise((resolve) => {
     const req = { url: '/api/history/track?window=3600s', method: 'GET', headers: {} }
@@ -128,7 +128,7 @@ test('proxy: routes /api/history to local history when available, else mirrors',
 
   // history UNCONFIGURED → falls through to mirror
   const hoff = createHistory(app, { token: '' }); hoff.start()
-  const proxy2 = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: hoff, storeDir: '/tmp/sk-hist-test-store2', manifest: { enabled: false } })
+  const proxy2 = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: hoff, storeDir: '/tmp/sk-hist-test-store2', manifest: { enabled: false }, seed: { enabled: false } })
   proxy2.start()
   const fell = await new Promise((resolve) => {
     const req = { url: '/api/history/track?window=3600s', method: 'GET', headers: {} }

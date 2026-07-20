@@ -72,7 +72,7 @@ test('plugin route: /p/* MISS then HIT; disabled -> 503', async (t) => {
   const factory = require('../index.js')
   const app = { getDataDirPath: () => store, debug: () => {}, setPluginStatus: () => {}, error: () => {} }
   const plugin = factory(app)
-  plugin.start({ sync: { enabled: false }, proxy: { enabled: true, sailkickUrl: up.url, storeDir: store } })
+  plugin.start({ sync: { enabled: false }, proxy: { enabled: true, sailkickUrl: up.url, storeDir: store, manifest: { enabled: false }, seed: { enabled: false } } })
 
   const server = express(); const router = express.Router()
   plugin.registerWithRouter(router)

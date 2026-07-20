@@ -65,6 +65,33 @@ POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain   # refresh app shell
 POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap  # nuke one tileset
 ```
 
+## Offline map coverage — global base seed + region prefetch
+On-demand caching only holds what you browsed. To make a usable map exist offline
+*everywhere*, the plugin seeds a worldwide low-zoom base on start and lets you warm a
+passage area on demand.
+
+- **Global base seed** (default on): caches two worldwide layers, pinned forever —
+  **coastline** (sparse vector `.pbf`, parent-guided descent so it probes ~4× the real
+  tiles, not a full pyramid) and **seabed/bathy** (dense depth raster). Defaults
+  `coastlineMaxZoom 8` (~12k tiles) + `seabedMaxZoom 6` (~5.5k). Idempotent (re-runs
+  hit cache only) and self-throttling — it reuses the circuit breaker, so it goes quiet
+  offline and resumes when back online. Progress shows in the plugin status line.
+  Config: `proxy.seed.{enabled,coastlineMaxZoom,seabedMaxZoom,concurrency}`.
+- **Region prefetch** — before a passage, warm the detailed chart layers for your area:
+  ```
+  POST /plugins/sailkick-boat/prefetch/region
+    { "bbox":[w,s,e,n], "minZoom":8, "maxZoom":15,
+      "layers":["osm-standard","bathy","seamap","coastline"] }
+  ```
+  Enumerates the bbox×zoom×layers rectangle and warms it. It **estimates first** and
+  refuses > 50k tiles unless you pass `"force":true` (so a huge box can't run away over
+  the link). Returns `{requested,cached,empty,failed}`.
+- **Empty tiles** (sparse coastline/seamap) are **negative-cached** (`.404` sentinel), so
+  offline they read as "empty" (404) exactly like online instead of stalling.
+
+Note: the app's **Coastline** and depth layers are default-off toggles — enable them in
+the app to see the seeded base.
+
 ## No login on the boat (single-tenant)
 The cloud app gates behind a boat-account login (a `Secure` session cookie), which
 can't work over the boat's plain-HTTP offline mirror — the browser drops a `Secure`

@@ -82,6 +82,17 @@ module.exports = function (app) {
               token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Required to enable local history. Without it, /api/history falls through to the mirror.' },
               requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 }
             }
+          },
+          seed: {
+            type: 'object',
+            title: 'Offline base seed (global coastline + seabed)',
+            description: 'On start, cache a worldwide low-zoom base so a usable map exists offline everywhere. Idempotent; self-throttles when offline. Enable the "Coastline"/depth layers in the app to see it.',
+            properties: {
+              enabled: { type: 'boolean', title: 'Seed the global base on start', default: true },
+              coastlineMaxZoom: { type: 'number', title: 'Coastline max zoom', description: 'Sparse vector coastline z0..N (z8 ≈ 12k tiles).', default: 8 },
+              seabedMaxZoom: { type: 'number', title: 'Seabed (bathy) max zoom', description: 'Dense depth raster z0..N (z6 ≈ 5.5k tiles).', default: 6 },
+              concurrency: { type: 'number', title: 'Parallel fetches', default: 4 }
+            }
           }
         }
       }
@@ -164,6 +175,10 @@ module.exports = function (app) {
     })
     router.post('/prefetch', (req, res) => {
       if (proxy) proxy.handlePrefetch(req, res)
+      else res.status(503).send('proxy not enabled')
+    })
+    router.post('/prefetch/region', (req, res) => {
+      if (proxy) proxy.handlePrefetchRegion(req, res)
       else res.status(503).send('proxy not enabled')
     })
     router.post('/cache/clear', (req, res) => {
