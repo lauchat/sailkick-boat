@@ -73,13 +73,13 @@ module.exports = function (app) {
           history: {
             type: 'object',
             title: 'Local history (app Trends panel + track)',
-            description: 'Serve the app\'s /api/history endpoints from the boat\'s local InfluxDB so trends + track work offline. Falls through to the cloud mirror when not configured.',
+            description: 'Serve the app\'s /api/history endpoints locally so trends + track work offline. With a read token → full history from a local InfluxDB. Without one → a DB-less ~1h ring sampled from live telemetry (e.g. SignalK on a Victron GX with no InfluxDB).',
             properties: {
-              enabled: { type: 'boolean', title: 'Serve /api/history from local InfluxDB', default: true },
+              enabled: { type: 'boolean', title: 'Serve /api/history locally', default: true },
               influxUrl: { type: 'string', title: 'Local InfluxDB URL', default: 'http://127.0.0.1:8086' },
               org: { type: 'string', title: 'Organization', default: 'addiction' },
               bucket: { type: 'string', title: 'Bucket', default: 'bandg' },
-              token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Required to enable local history. Without it, /api/history falls through to the mirror.' },
+              token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Set to serve full history from a local InfluxDB. Leave blank to use the DB-less live-telemetry ring (Victron GX / no InfluxDB).' },
               requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 }
             }
           },
@@ -147,7 +147,9 @@ module.exports = function (app) {
       }
       if (!pOpts.history || pOpts.history.enabled !== false) {
         try {
-          history = createHistory(app, pOpts.history || {})
+          // ringSource = the telemetry module: when no local InfluxDB is configured
+          // (e.g. a Victron GX), history serves a DB-less 1h ring from live telemetry.
+          history = createHistory(app, { ...(pOpts.history || {}), ringSource: telemetry })
           history.start()
           pOpts.history = history // proxy dispatches /api/history to it when available()
         } catch (e) {

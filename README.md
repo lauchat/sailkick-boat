@@ -109,6 +109,13 @@ config passes through untouched. Toggle off with `proxy.openAccess: false` to ke
 the cloud login gate.
 
 ## Local history (offline Trends + track)
+Two ways, chosen automatically:
+- **Read token set** → full history queried from a **local InfluxDB** (the boat's `bandg`).
+- **No token, telemetry on** → a **DB-less ~1 h ring** sampled from live telemetry (the
+  same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
+  **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
+  (`historyAvailable` reports true either way, so the app shows the Trends panel.)
+
 The sailkick app is deployment-agnostic about history: *central Influx in the
 cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
 **with** a full local InfluxDB — so the proxy serves the app's history endpoints
