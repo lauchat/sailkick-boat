@@ -80,7 +80,10 @@ module.exports = function (app) {
               org: { type: 'string', title: 'Organization', default: 'addiction' },
               bucket: { type: 'string', title: 'Bucket', default: 'bandg' },
               token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Set to serve full history from a local InfluxDB. Leave blank to use the DB-less live-telemetry ring (Victron GX / no InfluxDB).' },
-              requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 }
+              requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 },
+              ringPersist: { type: 'boolean', title: 'Persist the DB-less ring across restarts', description: 'Append-log in the plugin data dir. Off = in-memory only (lost on restart). Ignored when a token is set (InfluxDB is used).', default: true },
+              ringWindowSec: { type: 'number', title: 'DB-less ring window (s)', description: 'How much history the ring keeps: 86400 = 24h (default), up to 2592000 = 30d for long passages. Resolution auto-coarsens for large windows. NB: the app currently caps history requests at 24h.', default: 86400 },
+              ringSampleSec: { type: 'number', title: 'DB-less ring sample interval (s)', description: 'Auto-raised for large windows so the ring stays bounded (~50k samples).', default: 15 }
             }
           },
           seed: {

@@ -111,10 +111,18 @@ the cloud login gate.
 ## Local history (offline Trends + track)
 Two ways, chosen automatically:
 - **Read token set** → full history queried from a **local InfluxDB** (the boat's `bandg`).
-- **No token, telemetry on** → a **DB-less ~1 h ring** sampled from live telemetry (the
+- **No token, telemetry on** → a **DB-less ring** sampled from live telemetry (the
   same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
   **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
   (`historyAvailable` reports true either way, so the app shows the Trends panel.)
+  - **Persistent (append-log):** the ring is saved to the plugin data dir as a JSONL
+    append-log, so it **survives restarts**. Each sample appends one line; the file is
+    compacted (atomic rewrite to the current window) only rarely, so a long passage
+    writes < ~1 GB (vs the ~600 GB a full-rewrite snapshot would). Config
+    `proxy.history.ringWindowSec` (default 24 h, up to 2 592 000 = 30 d),
+    `ringSampleSec` (auto-coarsened so the ring stays ≤ ~50 k samples at any window),
+    `ringPersist` (default on; off = in-memory only). NB: the app currently caps
+    history requests at 24 h — a >24 h window needs the app-side clamp raised too.
 
 The sailkick app is deployment-agnostic about history: *central Influx in the
 cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
