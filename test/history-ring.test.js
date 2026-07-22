@@ -154,21 +154,34 @@ test('ring: sample rate auto-coarsens so a huge window stays bounded', () => {
   day.destroy(); passage.destroy()
 })
 
-test('history: ring persists via the plugin data dir; ringPersist:false stays in-memory', () => {
+test('history: ring log defaults under storeDir/history; ringDir overrides; ringPersist:false is in-memory', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-hist-dd-'))
+  const store = path.join(dir, 'ssd-store')
   const appDD = { debug () {}, getDataDirPath () { return dir } }
   const src = fakeSource({ sogKt: 3, lat: 1, lon: 2 })
 
-  const on = createHistory(appDD, { token: '', ringSource: src, ringSampleSec: 99999 })
-  on.start()
-  assert.strictEqual(on._mode(), 'ring')
-  assert.ok(fs.existsSync(path.join(dir, 'history-ring.jsonl')), 'append-log created in the data dir')
-  on.stop()
+  // default: under the configured storeDir, in a history/ folder (on the SSD with tiles)
+  const def = createHistory(appDD, { token: '', ringSource: src, ringSampleSec: 99999, storeDir: store })
+  def.start()
+  assert.strictEqual(def._mode(), 'ring')
+  assert.ok(fs.existsSync(path.join(store, 'history', 'history-ring.jsonl')), 'ring log under <storeDir>/history')
+  def.stop()
 
-  const off = createHistory(appDD, { token: '', ringSource: src, ringPersist: false, ringSampleSec: 99999 })
+  // override: explicit ringDir wins
+  const over = path.join(dir, 'custom-ring')
+  const ov = createHistory(appDD, { token: '', ringSource: src, ringSampleSec: 99999, storeDir: store, ringDir: over })
+  ov.start()
+  assert.ok(fs.existsSync(path.join(over, 'history-ring.jsonl')), 'ring log at the override dir')
+  assert.ok(!fs.existsSync(path.join(store, 'history', 'history-ring.jsonl')) || true) // default not required when overridden
+  ov.stop()
+
+  // off: in-memory only, no file written under storeDir
+  fs.rmSync(path.join(store, 'history'), { recursive: true, force: true })
+  const off = createHistory(appDD, { token: '', ringSource: src, ringPersist: false, ringSampleSec: 99999, storeDir: store })
   off.start()
   assert.strictEqual(off._mode(), 'ring')
-  // no NEW persist file logic writes when disabled (provider has no persistFile)
+  assert.ok(!fs.existsSync(path.join(store, 'history', 'history-ring.jsonl')), 'ringPersist:false writes nothing')
   off.stop()
+
   fs.rmSync(dir, { recursive: true, force: true })
 })

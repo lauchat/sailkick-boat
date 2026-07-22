@@ -61,9 +61,13 @@ never affected; a single success clears the breaker.
 
 Manual force-refresh (no SSH):
 ```
-POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain   # refresh app shell, keep tiles
-POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap  # nuke one tileset
+POST /plugins/sailkick-boat/cache/clear                            # default keep: tiles,terrain,history
+POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain,history # refresh app shell; keep tiles + ring log
+POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap        # nuke one tileset
 ```
+(The persistent history ring log lives under `<storeDir>/history`, so keep `history`
+when clearing — the default keep already does. A hand-typed `find` clear should add
+`! -name history` alongside `! -name tiles ! -name terrain`.)
 
 ## Offline map coverage — global base seed + region prefetch
 On-demand caching only holds what you browsed. To make a usable map exist offline
@@ -115,8 +119,9 @@ Two ways, chosen automatically:
   same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
   **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
   (`historyAvailable` reports true either way, so the app shows the Trends panel.)
-  - **Persistent (append-log):** the ring is saved to the plugin data dir as a JSONL
-    append-log, so it **survives restarts**. Each sample appends one line; the file is
+  - **Persistent (append-log):** the ring is saved as a JSONL append-log at
+    `<storeDir>/history/history-ring.jsonl` (on the SSD/USB with the tiles; override with
+    `proxy.history.ringDir`), so it **survives restarts**. Each sample appends one line; the file is
     compacted (atomic rewrite to the current window) only rarely, so a long passage
     writes < ~1 GB (vs the ~600 GB a full-rewrite snapshot would). Config
     `proxy.history.ringWindowSec` (default 24 h, up to 2 592 000 = 30 d),

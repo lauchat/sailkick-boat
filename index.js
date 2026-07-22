@@ -83,7 +83,8 @@ module.exports = function (app) {
               requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 },
               ringPersist: { type: 'boolean', title: 'Persist the DB-less ring across restarts', description: 'Append-log in the plugin data dir. Off = in-memory only (lost on restart). Ignored when a token is set (InfluxDB is used).', default: true },
               ringWindowSec: { type: 'number', title: 'DB-less ring window (s)', description: 'How much history the ring keeps: 86400 = 24h (default), up to 2592000 = 30d for long passages. Resolution auto-coarsens for large windows. NB: the app currently caps history requests at 24h.', default: 86400 },
-              ringSampleSec: { type: 'number', title: 'DB-less ring sample interval (s)', description: 'Auto-raised for large windows so the ring stays bounded (~50k samples).', default: 15 }
+              ringSampleSec: { type: 'number', title: 'DB-less ring sample interval (s)', description: 'Auto-raised for large windows so the ring stays bounded (~50k samples).', default: 15 },
+              ringDir: { type: 'string', title: 'Ring log directory (override)', description: 'Where the persistent ring log lives. Default: a "history" folder under the cache directory (storeDir), so it sits on the SSD/USB with the tiles. Set to override.' }
             }
           },
           seed: {
@@ -151,8 +152,9 @@ module.exports = function (app) {
       if (!pOpts.history || pOpts.history.enabled !== false) {
         try {
           // ringSource = the telemetry module: when no local InfluxDB is configured
-          // (e.g. a Victron GX), history serves a DB-less 1h ring from live telemetry.
-          history = createHistory(app, { ...(pOpts.history || {}), ringSource: telemetry })
+          // (e.g. a Victron GX), history serves a DB-less ring from live telemetry.
+          // storeDir lets the persistent ring log default onto the SSD with the tiles.
+          history = createHistory(app, { ...(pOpts.history || {}), ringSource: telemetry, storeDir: pOpts.storeDir })
           history.start()
           pOpts.history = history // proxy dispatches /api/history to it when available()
         } catch (e) {
