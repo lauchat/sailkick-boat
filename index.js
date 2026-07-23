@@ -4,6 +4,7 @@ const { createSync } = require('./lib/sync')
 const { createProxy } = require('./lib/proxy')
 const { createTelemetry } = require('./lib/telemetry')
 const { createHistory } = require('./lib/history')
+const { resolveAccountConfig, accountConfigured } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
 //   sync : gapless store-and-forward of self telemetry to InfluxDB (data OUT)
@@ -16,6 +17,7 @@ module.exports = function (app) {
   let telemetry = null
   let history = null
   let statusTimer = null
+  let accountStatus = null
 
   const plugin = {
     id: 'sailkick-boat',
@@ -28,6 +30,16 @@ module.exports = function (app) {
   plugin.schema = {
     type: 'object',
     properties: {
+      account: {
+        type: 'object',
+        title: 'Sailkick account (auto-configure)',
+        description: 'Log in with your sailkick account and the plugin fetches its cloud config (write token, bucket, org, InfluxDB URL) automatically — no manual token entry. Leave blank to configure sync/mirror manually below. The last-good config is cached, so sync keeps working offline.',
+        properties: {
+          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'e.g. https://app.sailkick.com — used for login and as the mirror upstream.' },
+          slug: { type: 'string', title: 'Boat slug (username)' },
+          password: { type: 'string', title: 'Password' }
+        }
+      },
       sync: {
         type: 'object',
         title: 'Telemetry sync → InfluxDB',
@@ -127,7 +139,25 @@ module.exports = function (app) {
 
   plugin.start = function (options) {
     const opts = options || {}
+    // If a sailkick account is configured, fetch the cloud config first (write token,
+    // bucket, org, InfluxDB URL) and merge it in — then start the modules. Otherwise
+    // start immediately with the manually-entered config (unchanged behaviour).
+    ;(async () => {
+      if (accountConfigured(opts.account)) {
+        const r = await resolveAccountConfig(app, opts.account)
+        if (r.bundle) {
+          opts.sync = { ...(opts.sync || {}), influxUrl: r.bundle.influxUrl, org: r.bundle.org, bucket: r.bundle.bucket, token: r.bundle.writeToken }
+          opts.proxy = { ...(opts.proxy || {}), sailkickUrl: opts.account.sailkickUrl }
+          accountStatus = `account: ${opts.account.slug} (${r.source})`
+        } else {
+          accountStatus = `account: ${opts.account.slug} — no config (${r.error || 'not reachable, no cache'})`
+        }
+      }
+      startModules(opts)
+    })().catch((e) => (app.error || console.error)('[sailkick-boat] start failed: ' + e.message))
+  }
 
+  function startModules (opts) {
     // --- sync module (isolated: its failure must not affect the proxy) ---
     if (opts.sync && opts.sync.enabled !== false && opts.sync.influxUrl) {
       try { sync = createSync(app, opts.sync); sync.start() } catch (e) {
@@ -175,6 +205,7 @@ module.exports = function (app) {
   function updateStatus () {
     if (!app.setPluginStatus) return
     const parts = []
+    if (accountStatus) parts.push(accountStatus)
     if (sync) parts.push(sync.status())
     if (proxy) parts.push(proxy.status())
     if (telemetry) parts.push(telemetry.status())
@@ -193,6 +224,7 @@ module.exports = function (app) {
     telemetry = null
     history = null
     proxy = null
+    accountStatus = null
   }
 
   // Mounted by Signal K at /plugins/sailkick-boat. Handlers dispatch to the live

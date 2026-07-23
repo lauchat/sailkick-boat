@@ -142,6 +142,16 @@ works **offline** with the boat's own data. When the history InfluxDB isn't
 configured (no read token), these paths **fall through to the cloud mirror**, so
 an online boat is never worse off than before.
 
+## Easiest setup: log in with your sailkick account
+Instead of pasting InfluxDB URL / org / bucket / write-token, fill the **Sailkick
+account** section — **host URL + slug + password** — and the plugin fetches the rest of
+its cloud config on start (`POST <host>/api/boat/config`): the scoped write token,
+bucket, org, and InfluxDB URL for your boat. The bundle is cached (0600) in the plugin
+data dir, so sync keeps working **offline** after the first connect. Leave the account
+section blank to configure `sync`/`proxy` manually (advanced / self-hosted). Account
+values take precedence over the manual sync fields; the mirror upstream (`sailkickUrl`)
+is set from the account host.
+
 ## Config (each section toggleable)
 - **Telemetry sync → InfluxDB**: `enabled`, `influxUrl`, `org`, `bucket`, `token`, `spoolDir`, …
 - **Sailkick caching proxy**: `enabled`, `sailkickUrl` (the one upstream), `storeDir`, …
