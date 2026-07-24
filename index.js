@@ -66,7 +66,7 @@ module.exports = function (app) {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
           serveTelemetry: { type: 'boolean', title: 'Serve /ws/telemetry from local SignalK', description: 'Provide the app\'s telemetry bus from the boat\'s SignalK, so the app uses the same contract as the cloud server.', default: true },
           openAccess: { type: 'boolean', title: 'No login on the boat', description: 'Serve /api/config with the cloud login disabled, so the boat\'s own app opens without a password (single-tenant, offline-first). Turn off to keep the cloud login gate.', default: true },
-          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors, e.g. http://192.168.5.222:3000' },
+          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors (usually set automatically from the account section). e.g. https://app.sailkick.com' },
           proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). With host networking it is directly on the Pi. 0 = disable.', default: 8080 },
           localSignalkUrl: { type: 'string', title: 'Local SignalK URL (live telemetry)', description: 'Live data + WebSocket stream are proxied here (not cached, not mirrored).', default: 'http://127.0.0.1:3000' },
           localPaths: { type: 'array', title: 'Paths served by LOCAL SignalK', description: 'Prefixes routed to local SignalK instead of the mirror.', items: { type: 'string' }, default: ['/signalk'] },
@@ -89,7 +89,7 @@ module.exports = function (app) {
             properties: {
               enabled: { type: 'boolean', title: 'Serve /api/history locally', default: true },
               influxUrl: { type: 'string', title: 'Local InfluxDB URL', default: 'http://127.0.0.1:8086' },
-              org: { type: 'string', title: 'Organization', default: 'addiction' },
+              org: { type: 'string', title: 'Organization', default: 'signalk' },
               bucket: { type: 'string', title: 'Bucket', default: 'bandg' },
               token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Set to serve full history from a local InfluxDB. Leave blank to use the DB-less live-telemetry ring (Victron GX / no InfluxDB).' },
               requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 },
