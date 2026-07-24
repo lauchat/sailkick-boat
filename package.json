@@ -1,6 +1,6 @@
 {
   "name": "sailkick-boat",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "Signal K plugin: boat-side sailkick companion — gapless telemetry sync to InfluxDB, offline-first caching mirror of the sailkick host, and local telemetry + history endpoints served from the boat's own data.",
   "main": "index.js",
   "scripts": {
@@ -15,8 +15,16 @@
     "cache",
     "proxy"
   ],
-  "author": "sailkick",
+  "author": "lauchat",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lauchat/sailkick-boat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lauchat/sailkick-boat/issues"
+  },
+  "homepage": "https://github.com/lauchat/sailkick-boat#readme",
   "engines": {
     "node": ">=18"
   },
