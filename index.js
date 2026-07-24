@@ -90,7 +90,7 @@ module.exports = function (app) {
               enabled: { type: 'boolean', title: 'Serve /api/history locally', default: true },
               influxUrl: { type: 'string', title: 'Local InfluxDB URL', default: 'http://127.0.0.1:8086' },
               org: { type: 'string', title: 'Organization', default: 'signalk' },
-              bucket: { type: 'string', title: 'Bucket', default: 'bandg' },
+              bucket: { type: 'string', title: 'Bucket', default: 'signalk' },
               token: { type: 'string', title: 'Read token (scoped to the bucket)', description: 'Set to serve full history from a local InfluxDB. Leave blank to use the DB-less live-telemetry ring (Victron GX / no InfluxDB).' },
               requestTimeoutMs: { type: 'number', title: 'Query timeout (ms)', default: 15000 },
               ringPersist: { type: 'boolean', title: 'Persist the DB-less ring across restarts', description: 'Append-log in the plugin data dir. Off = in-memory only (lost on restart). Ignored when a token is set (InfluxDB is used).', default: true },

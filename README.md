@@ -11,7 +11,7 @@ One Signal K plugin, independently-toggleable modules — so the boat stays
   same contracts as the cloud, offline-first):
   - **`/ws/telemetry`** — the app's live telemetry bus, fed from local SignalK.
   - **`/api/history/{series,track}`** — the app's Trends panel + track, served
-    from the boat's local InfluxDB (`bandg`) with the full local history.
+    from the boat's local InfluxDB (or a DB-less telemetry ring) — full local history.
 
 Kept as separate modules so a proxy fault can't wedge the data-critical sync path.
 
@@ -114,7 +114,8 @@ the cloud login gate.
 
 ## Local history (offline Trends + track)
 Two ways, chosen automatically:
-- **Read token set** → full history queried from a **local InfluxDB** (the boat's `bandg`).
+- **Read token set** → full history queried from a **local InfluxDB** (e.g. a bucket
+  written by `signalk-to-influxdb-v2`).
 - **No token, telemetry on** → a **DB-less ring** sampled from live telemetry (the
   same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
   **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
@@ -130,17 +131,16 @@ Two ways, chosen automatically:
     history requests at 24 h — a >24 h window needs the app-side clamp raised too.
 
 The sailkick app is deployment-agnostic about history: *central Influx in the
-cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge
-**with** a full local InfluxDB — so the proxy serves the app's history endpoints
-straight from `bandg`:
+cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge that
+serves the app's history endpoints from its **own** data (local InfluxDB or the ring):
 ```
 GET /api/history/series?window=3600s&every=30s -> { series: { sog|heading|tws|… : [[tMs,val],…] } }
 GET /api/history/track?window=3600s            -> { track: [{ t, lat, lon }, …] }
 ```
 Same JSON the cloud returns, so the browser can't tell the difference — but it
-works **offline** with the boat's own data. When the history InfluxDB isn't
-configured (no read token), these paths **fall through to the cloud mirror**, so
-an online boat is never worse off than before.
+works **offline** with the boat's own data. Only when neither a local InfluxDB nor
+telemetry is available do these paths **fall through to the cloud mirror**, so an
+online boat is never worse off than before.
 
 ## Easiest setup: log in with your sailkick account
 Instead of pasting InfluxDB URL / org / bucket / write-token, fill the **Sailkick
@@ -160,8 +160,8 @@ is set from the account host.
     `pollIntervalSec` (default 300) — auto-refresh datasets when the cloud
     announces a new bake.
   - **Local history** (default on): `influxUrl` (default `http://127.0.0.1:8086`),
-    `org` (`addiction`), `bucket` (`bandg`), `token` (a read token — required to
-    enable local history).
+    `org`, `bucket`, `token` (a read token — set to serve full history from a local
+    InfluxDB; blank = the DB-less telemetry ring), plus the ring settings above.
 
 Point your chart app / browser at:
 `http://<boat>:3000/plugins/sailkick-boat/p/`
