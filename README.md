@@ -2,11 +2,12 @@
 
 > ## ⚠️ Project status: early alpha — no public service yet
 >
-> This plugin is the **boat-side companion of the sailkick platform** (a self-hosted
-> 3D sailing app + a central telemetry sync server). **That platform is not publicly
-> available yet** — there is no public cloud endpoint to point this plugin at, and it
-> is currently developed and tested only against sailkick's own development
-> environment (a private LAN).
+> This plugin is the **boat-side companion of the sailkick platform**: **cloud
+> telemetry** (gapless boat→shore sync of your vessel's data into a central InfluxDB)
+> and a **local proxy that keeps the sailkick app and its charts/maps fully usable
+> offline** on board. **The public service (`app.sailkick.io`) is not live yet** —
+> today the platform runs only in sailkick's own development environment (a private
+> LAN), so there is no public endpoint to point this plugin at.
 >
 > It is published this early for development visibility and for adventurous
 > **self-hosters**: to use it today you must run your own sailkick app server and
@@ -186,6 +187,16 @@ cd ~/.signalk && npm install sailkick-boat   # or a packed tarball
 ```
 Enable + configure under **Server → Plugin Config → "Sailkick boat companion"**.
 Put `spoolDir`/`storeDir` on the SSD (or leave blank for the plugin data dir).
+
+### Victron GX / Venus OS (Cerbo, Ekrano)
+Works on Venus OS Large (Signal K enabled). Point `storeDir` at USB/SD storage
+(internal flash is small) and lower the seed `concurrency`. Leave the history token
+blank — the DB-less telemetry ring is used automatically. **Note:** a GX only sees
+Victron data (batteries, solar, tanks) by default; **position/wind/speed/depth
+require the boat's NMEA2000 backbone on the VE.Can port** (250 kbit/s N2K profile +
+a VE.Can↔Micro-C drop cable; leave the spare RJ45 unterminated) or a USB GPS/N2K
+gateway. Without a position source, the live boat / trends / area-download stay
+idle — energy telemetry still syncs to the cloud.
 
 ## Dev / tests
 ```bash

@@ -35,7 +35,7 @@ module.exports = function (app) {
         title: 'Sailkick account (auto-configure)',
         description: 'Log in with your sailkick account and the plugin fetches its cloud config (write token, bucket, org, InfluxDB URL) automatically — no manual token entry. Leave blank to configure sync/mirror manually below. The last-good config is cached, so sync keeps working offline.',
         properties: {
-          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'e.g. https://app.sailkick.com — used for login and as the mirror upstream.' },
+          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'Used for login and as the mirror upstream. Default: the public sailkick service; change for a self-hosted server.', default: 'https://app.sailkick.io' },
           slug: { type: 'string', title: 'Boat slug (username)' },
           password: { type: 'string', title: 'Password' }
         }
@@ -66,7 +66,7 @@ module.exports = function (app) {
           enabled: { type: 'boolean', title: 'Enable caching proxy', default: true },
           serveTelemetry: { type: 'boolean', title: 'Serve /ws/telemetry from local SignalK', description: 'Provide the app\'s telemetry bus from the boat\'s SignalK, so the app uses the same contract as the cloud server.', default: true },
           openAccess: { type: 'boolean', title: 'No login on the boat', description: 'Serve /api/config with the cloud login disabled, so the boat\'s own app opens without a password (single-tenant, offline-first). Turn off to keep the cloud login gate.', default: true },
-          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors (usually set automatically from the account section). e.g. https://app.sailkick.com' },
+          sailkickUrl: { type: 'string', title: 'Sailkick host URL', description: 'The one upstream this boat mirrors (usually set automatically from the account section). e.g. https://app.sailkick.io' },
           proxyPort: { type: 'number', title: 'Mirror server port', description: 'Standalone HTTP server serving the mirror at origin root (no SignalK auth). With host networking it is directly on the Pi. 0 = disable.', default: 8080 },
           localSignalkUrl: { type: 'string', title: 'Local SignalK URL (live telemetry)', description: 'Live data + WebSocket stream are proxied here (not cached, not mirrored).', default: 'http://127.0.0.1:3000' },
           localPaths: { type: 'array', title: 'Paths served by LOCAL SignalK', description: 'Prefixes routed to local SignalK instead of the mirror.', items: { type: 'string' }, default: ['/signalk'] },
