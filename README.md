@@ -1,5 +1,19 @@
 # sailkick-boat
 
+> ## ⚠️ Project status: early alpha — no public service yet
+>
+> This plugin is the **boat-side companion of the sailkick platform** (a self-hosted
+> 3D sailing app + a central telemetry sync server). **That platform is not publicly
+> available yet** — there is no public cloud endpoint to point this plugin at, and it
+> is currently developed and tested only against sailkick's own development
+> environment (a private LAN).
+>
+> It is published this early for development visibility and for adventurous
+> **self-hosters**: to use it today you must run your own sailkick app server and
+> central InfluxDB v2. Expect breaking changes while the version is 0.x. If you found
+> this in the Signal K Appstore and don't run a sailkick server, it will not do
+> anything useful yet — watch the repo for the public launch.
+
 One Signal K plugin, independently-toggleable modules — so the boat stays
 "just SignalK + plugins":
 
