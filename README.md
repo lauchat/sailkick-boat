@@ -14,6 +14,10 @@
 > central InfluxDB v2. Expect breaking changes while the version is 0.x. If you found
 > this in the Signal K Appstore and don't run a sailkick server, it will not do
 > anything useful yet — watch the repo for the public launch.
+>
+> **Interested anyway?** If you'd like more information, or want to try the app on
+> your own boat, get in touch: **[info@sailkick.io](mailto:info@sailkick.io)**.
+> Early testers are welcome.
 
 One Signal K plugin, independently-toggleable modules — so the boat stays
 "just SignalK + plugins":
@@ -80,7 +84,7 @@ POST /plugins/sailkick-boat/cache/clear                            # default kee
 POST /plugins/sailkick-boat/cache/clear?keep=tiles,terrain,history # refresh app shell; keep tiles + ring log
 POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap        # nuke one tileset
 ```
-(The persistent history ring log lives under `<storeDir>/history`, so keep `history`
+(The persistent history ring log lives under `<dataDir>/history`, so keep `history`
 when clearing — the default keep already does. A hand-typed `find` clear should add
 `! -name history` alongside `! -name tiles ! -name terrain`.)
 
@@ -95,13 +99,14 @@ passage area on demand.
   `coastlineMaxZoom 8` (~12k tiles) + `seabedMaxZoom 6` (~5.5k). Idempotent (re-runs
   hit cache only) and self-throttling — it reuses the circuit breaker, so it goes quiet
   offline and resumes when back online. Progress shows in the plugin status line.
-  Config: `proxy.seed.{enabled,coastlineMaxZoom,seabedMaxZoom,concurrency}`.
+  Config: **Download a worldwide base map on start** (`seedEnabled`); zoom levels and
+  concurrency are constants (hand-editable as `proxy.seed.*`).
 - **Download around the boat** (settings dropdowns, no token) — the easiest way to
   cache a passage area: in Plugin Config pick a **Radius around boat** (25/50/100/200 nm)
   and a **Detail level** (Overview z12 … Harbor z15), then save. The plugin reads the
   boat's current position from local SignalK, builds a box, and warms the chart layers
   in the background (progress in the status line). Idempotent; re-saving tops up. An
-  oversized radius+detail is refused (reduce one). Config `proxy.prefetch.{radiusNm,detailZoom,concurrency}`.
+  oversized radius+detail is refused (reduce one). Config `prefetchRadiusNm` / `prefetchDetailZoom`.
 - **Region prefetch (API)** — for scripted/arbitrary boxes, warm the detailed chart layers for an area:
   ```
   POST /plugins/sailkick-boat/prefetch/region
@@ -124,8 +129,8 @@ cookie on HTTP, so login just loops. Since the boat is single-tenant and its dat
 endpoints aren't server-gated, the proxy serves `/api/config` with `auth.required`
 forced to `false` (and `historyAvailable` forced on when history is served locally),
 so the boat's own app opens with no password, fully offline. Everything else in the
-config passes through untouched. Toggle off with `proxy.openAccess: false` to keep
-the cloud login gate.
+config passes through untouched. (Hand-edit `proxy.openAccess: false` to keep the cloud
+login gate — there is no toggle, since the gate cannot complete over the mirror anyway.)
 
 ## Local history (offline Trends + track)
 Two ways, chosen automatically:
@@ -136,7 +141,7 @@ Two ways, chosen automatically:
   **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
   (`historyAvailable` reports true either way, so the app shows the Trends panel.)
   - **Persistent (append-log):** the ring is saved as a JSONL append-log at
-    `<storeDir>/history/history-ring.jsonl` (on the SSD/USB with the tiles; override with
+    `<dataDir>/history/history-ring.jsonl` (on the SSD/USB with the tiles; override with
     `proxy.history.ringDir`), so it **survives restarts**. Each sample appends one line; the file is
     compacted (atomic rewrite to the current window) only rarely, so a long passage
     writes < ~1 GB (vs the ~600 GB a full-rewrite snapshot would). Config
@@ -157,26 +162,43 @@ works **offline** with the boat's own data. Only when neither a local InfluxDB n
 telemetry is available do these paths **fall through to the cloud mirror**, so an
 online boat is never worse off than before.
 
-## Easiest setup: log in with your sailkick account
-Instead of pasting InfluxDB URL / org / bucket / write-token, fill the **Sailkick
-account** section — **host URL + slug + password** — and the plugin fetches the rest of
-its cloud config on start (`POST <host>/api/boat/config`): the scoped write token,
-bucket, org, and InfluxDB URL for your boat. The bundle is cached (0600) in the plugin
-data dir, so sync keeps working **offline** after the first connect. Leave the account
-section blank to configure `sync`/`proxy` manually (advanced / self-hosted). Account
-values take precedence over the manual sync fields; the mirror upstream (`sailkickUrl`)
-is set from the account host.
+## Setup: pair the boat once
+Fill the **Sailkick account** section — **invite code + boat name + password** — and
+save. The plugin calls the app's `POST /api/auth/signup` once: that creates your
+account, provisions its cloud storage, and returns the write token, bucket, org and
+InfluxDB URL for your boat. The bundle is cached (0600) in the plugin data dir and
+reused on every later start, so sync keeps working **offline** and across restarts.
 
-## Config (each section toggleable)
-- **Telemetry sync → InfluxDB**: `enabled`, `influxUrl`, `org`, `bucket`, `token`, `spoolDir`, …
-- **Sailkick caching proxy**: `enabled`, `sailkickUrl` (the one upstream), `storeDir`, …
-  - `serveTelemetry` (default on) — provide `/ws/telemetry` from local SignalK.
-  - **Cache manifest** (default on): `path` (default `/api/cache-manifest`),
-    `pollIntervalSec` (default 300) — auto-refresh datasets when the cloud
-    announces a new bake.
-  - **Local history** (default on): `influxUrl` (default `http://127.0.0.1:8086`),
-    `org`, `bucket`, `token` (a read token — set to serve full history from a local
-    InfluxDB; blank = the DB-less telemetry ring), plus the ring settings above.
+Pairing is **one-time by design** — the invite code is single-use, so the plugin never
+calls signup twice. Once `account.json` exists the account fields are no longer read;
+delete that file to re-pair (which needs a fresh invite).
+
+## Config
+The page is deliberately small — everything else has a right answer and is a constant
+in `index.js`.
+
+- **Sailkick account**: `invite`, `slug` (boat name), `password`
+- **Telemetry sync → cloud**: `enabled`
+- **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
+  (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
+  `prefetchDetailZoom`, `historyToken`
+
+`dataDir` is the one storage location — cached maps, the telemetry spool and the
+history ring log all live under it. **Put it on the SSD/USB disk, not the SD card.**
+Leave it blank and each part falls back to its historical spot under the plugin data
+dir.
+
+`historyToken` is optional and only matters if the boat already runs its own InfluxDB.
+Blank — the normal case — uses the built-in DB-less ring.
+
+Cache-manifest polling is always on (no toggle): tile freshness comes from the cloud
+announcing bakes, and without it a re-baked dataset would never refresh.
+
+**Self-hosting / advanced.** Every module still reads its option before falling back to
+the constant, so anything removed from the page can be set by hand in
+`~/.signalk/plugin-config-data/sailkick-boat.json` — `sync.influxUrl`, `sync.token`,
+`proxy.sailkickUrl`, `proxy.seed.coastlineMaxZoom`, the ring window, the retry backoff,
+and so on. Values saved by earlier versions keep working after an upgrade.
 
 Point your chart app / browser at:
 `http://<boat>:3000/plugins/sailkick-boat/p/`
@@ -186,11 +208,11 @@ Point your chart app / browser at:
 cd ~/.signalk && npm install sailkick-boat   # or a packed tarball
 ```
 Enable + configure under **Server → Plugin Config → "Sailkick boat companion"**.
-Put `spoolDir`/`storeDir` on the SSD (or leave blank for the plugin data dir).
+Set **Data directory** to a path on the SSD (or leave blank for the plugin data dir).
 
 ### Victron GX / Venus OS (Cerbo, Ekrano)
-Works on Venus OS Large (Signal K enabled). Point `storeDir` at USB/SD storage
-(internal flash is small) and lower the seed `concurrency`. Leave the history token
+Works on Venus OS Large (Signal K enabled). Point **Data directory** at USB/SD storage
+(internal flash is small). Leave the history token
 blank — the DB-less telemetry ring is used automatically. **Note:** a GX only sees
 Victron data (batteries, solar, tanks) by default; **position/wind/speed/depth
 require the boat's NMEA2000 backbone on the VE.Can port** (250 kbit/s N2K profile +
@@ -203,6 +225,12 @@ idle — energy telemetry still syncs to the cloud.
 npm install && npm test   # proxy: mirror/cache/offline + Express route; sync: subscribe+buffer
 ```
 Supersedes the separate `signalk-to-influxdb-gapless` + `signalk-tile-cache` plugins.
+
+## Contact
+Questions, feedback, or want to test the app on your own boat?
+Email **[info@sailkick.io](mailto:info@sailkick.io)** — happy to help with setup, and
+early testers are very welcome. Bug reports and feature requests are also fine as
+[GitHub issues](https://github.com/lauchat/sailkick-boat/issues).
 
 ## License
 MIT
