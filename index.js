@@ -16,7 +16,7 @@ const { resolveAccountConfig } = require('./lib/account')
 // Fixed cloud endpoints. Boats never choose these, so they are constants rather than
 // config fields — but every module still reads its option first (see startModules), so
 // a hand-edited plugin-config JSON can override any of them for self-hosting.
-const SAILKICK_APP_URL = 'https://app.sailkick.io' // signup + mirror upstream
+const SAILKICK_APP_URL = 'https://www.sailkick.io' // signup + mirror upstream
 const SAILKICK_INFLUX_URL = 'https://sync.sailkick.io' // data egress; pairing overrides this
 
 // Tuning that has a right answer. Deliberately NOT on the config page: a boat owner has

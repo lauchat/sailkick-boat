@@ -1,23 +1,20 @@
 # sailkick-boat
 
-> ## ⚠️ Project status: early alpha — no public service yet
+> ## ⚠️ Project status: early alpha — invite only
 >
 > This plugin is the **boat-side companion of the sailkick platform**: **cloud
 > telemetry** (gapless boat→shore sync of your vessel's data into a central InfluxDB)
 > and a **local proxy that keeps the sailkick app and its charts/maps fully usable
-> offline** on board. **The public service (`app.sailkick.io`) is not live yet** —
-> today the platform runs only in sailkick's own development environment (a private
-> LAN), so there is no public endpoint to point this plugin at.
+> offline** on board. The service runs at **[www.sailkick.io](https://www.sailkick.io)**.
 >
-> It is published this early for development visibility and for adventurous
-> **self-hosters**: to use it today you must run your own sailkick app server and
-> central InfluxDB v2. Expect breaking changes while the version is 0.x. If you found
-> this in the Signal K Appstore and don't run a sailkick server, it will not do
-> anything useful yet — watch the repo for the public launch.
+> **Pairing needs an invite code** — there is no open registration yet, so installing
+> this plugin from the Signal K Appstore is not enough on its own. Expect breaking
+> changes while the version is 0.x.
 >
-> **Interested anyway?** If you'd like more information, or want to try the app on
-> your own boat, get in touch: **[info@sailkick.io](mailto:info@sailkick.io)**.
-> Early testers are welcome.
+> **Want an invite, or more information?** Get in touch:
+> **[info@sailkick.io](mailto:info@sailkick.io)**. Early testers are welcome.
+> Self-hosters can point the plugin at their own sailkick server and InfluxDB v2
+> instead — see [Config](#config).
 
 One Signal K plugin, independently-toggleable modules — so the boat stays
 "just SignalK + plugins":
