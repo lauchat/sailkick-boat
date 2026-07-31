@@ -66,12 +66,11 @@ module.exports = function (app) {
     properties: {
       account: {
         type: 'object',
-        title: 'Sailkick account (one-time pairing)',
-        description: 'Pair this boat with your sailkick account once. The plugin creates the account, provisions its cloud storage, and stores the result locally — so it keeps syncing offline and after restarts. Your invite code is single-use; once paired these fields are no longer read.',
+        title: 'Sailkick account',
+        description: 'Register your boat at www.sailkick.io first — the signup screen shows a write token. Paste it here together with your boat name. Keep that token safe: it is shown only once and cannot be recovered.',
         properties: {
-          invite: { type: 'string', title: 'Invite code' },
-          slug: { type: 'string', title: 'Boat name', description: '2–40 characters: lowercase letters, numbers, dashes. This is your permanent boat id.' },
-          password: { type: 'string', title: 'Password', description: 'At least 8 characters.' }
+          slug: { type: 'string', title: 'Boat name', description: 'Exactly as registered on the website.' },
+          writeToken: { type: 'string', title: 'Write token', description: 'From the signup screen ("Write token"). Everything else — Influx URL, organization, bucket — is derived from it and your boat name.' }
         }
       },
       sync: {
@@ -115,23 +114,17 @@ module.exports = function (app) {
 
   plugin.start = function (options) {
     const opts = options || {}
-    // Pairing first: on the very first start this provisions the account and caches the
-    // bundle; on every later start it is a disk read (see lib/account — signup is
-    // single-use and must never run twice).
-    ;(async () => {
-      const r = await resolveAccountConfig(app, opts.account, { appUrl: SAILKICK_APP_URL })
-      if (r.bundle) {
-        accountStatus = r.source === 'paired'
-          ? `account: paired as ${r.bundle.slug}`
-          : `account: ${r.bundle.slug}`
-      } else if (r.error) {
-        accountStatus = `account: pairing failed — ${r.error}${r.terminal ? '' : ' (will retry on restart)'}`
-        ;(app.error || console.error)('[sailkick-boat] pairing failed: ' + r.error)
-      } else {
-        accountStatus = 'account: not paired — enter your invite code'
-      }
+    try {
+      // Purely local: the boat registers on the website, the owner pastes the write
+      // token here. Nothing to fetch, so nothing that can fail while offline.
+      const r = resolveAccountConfig(app, opts.account, { influxUrl: SAILKICK_INFLUX_URL })
+      if (r.bundle) accountStatus = `account: ${r.bundle.slug}`
+      else if (r.error) accountStatus = `account: ${r.error}`
+      else accountStatus = 'account: not configured — register at www.sailkick.io, then paste your write token'
       startModules(opts, r.bundle)
-    })().catch((e) => (app.error || console.error)('[sailkick-boat] start failed: ' + e.message))
+    } catch (e) {
+      (app.error || console.error)('[sailkick-boat] start failed: ' + e.message)
+    }
   }
 
   function startModules (opts, bundle) {

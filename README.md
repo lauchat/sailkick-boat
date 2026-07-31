@@ -7,8 +7,8 @@
 > and a **local proxy that keeps the sailkick app and its charts/maps fully usable
 > offline** on board. The service runs at **[www.sailkick.io](https://www.sailkick.io)**.
 >
-> **Pairing needs an invite code** — there is no open registration yet, so installing
-> this plugin from the Signal K Appstore is not enough on its own. Expect breaking
+> **Registration is invite-only** and happens on the website, not in the plugin — so
+> installing this from the Signal K Appstore is not enough on its own. Expect breaking
 > changes while the version is 0.x.
 >
 > **Want an invite, or more information?** Get in touch:
@@ -159,22 +159,29 @@ works **offline** with the boat's own data. Only when neither a local InfluxDB n
 telemetry is available do these paths **fall through to the cloud mirror**, so an
 online boat is never worse off than before.
 
-## Setup: pair the boat once
-Fill the **Sailkick account** section — **invite code + boat name + password** — and
-save. The plugin calls the app's `POST /api/auth/signup` once: that creates your
-account, provisions its cloud storage, and returns the write token, bucket, org and
-InfluxDB URL for your boat. The bundle is cached (0600) in the plugin data dir and
-reused on every later start, so sync keeps working **offline** and across restarts.
+## Setup: register on the web, then paste the token
+1. Register your boat at **[www.sailkick.io](https://www.sailkick.io)** (an invite code
+   is needed — see above). The signup screen shows your boat's ingest credentials.
+2. **Copy the "Write token"** — it is shown **once** and cannot be recovered. If you
+   lose it you need a new one minted.
+3. In Plugin Config, fill the **Sailkick account** section — **boat name + write
+   token** — and save.
 
-Pairing is **one-time by design** — the invite code is single-use, so the plugin never
-calls signup twice. Once `account.json` exists the account fields are no longer read;
-delete that file to re-pair (which needs a fresh invite).
+That is the whole handshake. The plugin resolves everything else locally (`bucket` =
+`<slug>_raw`, `org` = `sailkick`) and never calls the app for configuration, so setup
+works with no internet and there is nothing to re-fetch after a restart.
+
+Registration deliberately happens **only** in the web app. The plugin cannot sign up,
+so there is no way to half-create an account or burn an invite from the boat.
+
+> Changing the token later — after a rotation, say — is just editing the field and
+> saving. Pasted values are trimmed, and the boat name is lower-cased for you.
 
 ## Config
 The page is deliberately small — everything else has a right answer and is a constant
 in `index.js`.
 
-- **Sailkick account**: `invite`, `slug` (boat name), `password`
+- **Sailkick account**: `slug` (boat name), `writeToken`
 - **Telemetry sync → cloud**: `enabled`
 - **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
   (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
