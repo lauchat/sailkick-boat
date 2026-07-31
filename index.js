@@ -45,6 +45,17 @@ const HISTORY_TUNING = {
   ringSampleSec: 15
 }
 
+// A *cloud* endpoint on loopback means telemetry never leaves the boat. On the wire it
+// is indistinguishable from a normal offline backlog — the spool just grows — so it has
+// to be called out explicitly. (The local history DB is legitimately on 127.0.0.1; this
+// check is only ever applied to the sync path.)
+function isLoopbackUrl (u) {
+  try {
+    const h = new URL(u).hostname.replace(/^\[|\]$/g, '')
+    return h === 'localhost' || h === '::1' || /^127\./.test(h)
+  } catch { return false }
+}
+
 module.exports = function (app) {
   let sync = null
   let proxy = null
@@ -52,6 +63,7 @@ module.exports = function (app) {
   let history = null
   let statusTimer = null
   let accountStatus = null
+  let syncWarning = null
 
   const plugin = {
     id: 'sailkick-boat',
@@ -117,7 +129,7 @@ module.exports = function (app) {
     try {
       // Purely local: the boat registers on the website, the owner pastes the write
       // token here. Nothing to fetch, so nothing that can fail while offline.
-      const r = resolveAccountConfig(app, opts.account, { influxUrl: SAILKICK_INFLUX_URL })
+      const r = resolveAccountConfig(app, opts.account)
       if (r.bundle) accountStatus = `account: ${r.bundle.slug}`
       else if (r.error) accountStatus = `account: ${r.error}`
       else accountStatus = 'account: not configured — register at www.sailkick.io, then paste your write token'
@@ -144,7 +156,12 @@ module.exports = function (app) {
     if (s.enabled !== false) {
       const syncOpts = {
         ...SYNC_TUNING,
-        influxUrl: b.influxUrl || s.influxUrl || SAILKICK_INFLUX_URL,
+        // The cloud endpoint is fleet-wide and fixed. A pasted or cached bundle can
+        // never set it — the app's signup screen hands out its own http://localhost:8086,
+        // and a boat that believed it would spool to loopback forever, looking healthy.
+        // `sync.influxUrl` survives only as a self-hosting escape hatch: it is not in
+        // the schema, so it cannot arrive by pasting, only by editing the config JSON.
+        influxUrl: s.influxUrl || SAILKICK_INFLUX_URL,
         org: b.org || s.org || SYNC_TUNING.org,
         bucket: b.bucket || s.bucket,
         token: b.writeToken || s.token,
@@ -156,6 +173,10 @@ module.exports = function (app) {
         requestTimeoutMs: s.requestTimeoutMs || SYNC_TUNING.requestTimeoutMs,
         retryMinMs: s.retryMinMs || SYNC_TUNING.retryMinMs,
         retryMaxMs: s.retryMaxMs || SYNC_TUNING.retryMaxMs
+      }
+      if (isLoopbackUrl(syncOpts.influxUrl)) {
+        syncWarning = `sync: ⚠ writing to ${syncOpts.influxUrl} — telemetry is NOT reaching the cloud`
+        ;(app.error || console.error)(`[sailkick-boat] sync target ${syncOpts.influxUrl} is a local address — telemetry will not reach the cloud`)
       }
       try { sync = createSync(app, syncOpts); sync.start() } catch (e) {
         (app.error || console.error)('[sailkick-boat] sync start failed: ' + e.message)
@@ -248,6 +269,7 @@ module.exports = function (app) {
     if (!app.setPluginStatus) return
     const parts = []
     if (accountStatus) parts.push(accountStatus)
+    if (syncWarning) parts.push(syncWarning)
     if (sync) parts.push(sync.status())
     if (proxy) parts.push(proxy.status())
     if (telemetry) parts.push(telemetry.status())
@@ -267,6 +289,7 @@ module.exports = function (app) {
     history = null
     proxy = null
     accountStatus = null
+    syncWarning = null
   }
 
   // Mounted by Signal K at /plugins/sailkick-boat. Handlers dispatch to the live

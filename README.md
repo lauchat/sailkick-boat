@@ -171,6 +171,13 @@ That is the whole handshake. The plugin resolves everything else locally (`bucke
 `<slug>_raw`, `org` = `sailkick`) and never calls the app for configuration, so setup
 works with no internet and there is nothing to re-fetch after a restart.
 
+> **Ignore the "Influx URL", "Organization" and "Bucket" on that screen** — they are for
+> the community `signalk-to-influxdb-v2` plugin. This plugin always writes to
+> `https://sync.sailkick.io`; the endpoint is fleet-wide and cannot be set from the UI,
+> so a wrong value can never redirect your telemetry. (Self-hosters: hand-edit
+> `sync.influxUrl` in the plugin config JSON.) If the status line ever warns that sync is
+> writing to a local address, telemetry is not leaving the boat.
+
 Registration deliberately happens **only** in the web app. The plugin cannot sign up,
 so there is no way to half-create an account or burn an invite from the boat.
 
