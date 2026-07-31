@@ -171,6 +171,12 @@ That is the whole handshake. The plugin resolves everything else locally (`bucke
 `<slug>_raw`, `org` = `sailkick`) and never calls the app for configuration, so setup
 works with no internet and there is nothing to re-fetch after a restart.
 
+> **Upgrading from before 0.14?** Old versions had visible `influxUrl` / `sailkickUrl`
+> fields. Whatever was typed into them is still in your saved config, and since 0.14.4
+> those leftovers are **ignored** — the plugin says so in the log and the status line
+> rather than silently obeying a dev address. To keep your own endpoints deliberately,
+> set `sync.selfHosted: true` / `proxy.selfHosted: true` in the config JSON.
+>
 > **Ignore the "Influx URL", "Organization" and "Bucket" on that screen** — they are for
 > the community `signalk-to-influxdb-v2` plugin. This plugin always writes to
 > `https://sync.sailkick.io`; the endpoint is fleet-wide and cannot be set from the UI,
@@ -230,6 +236,32 @@ require the boat's NMEA2000 backbone on the VE.Can port** (250 kbit/s N2K profil
 a VE.Can↔Micro-C drop cable; leave the spare RJ45 unterminated) or a USB GPS/N2K
 gateway. Without a position source, the live boat / trends / area-download stay
 idle — energy telemetry still syncs to the cloud.
+
+## Troubleshooting: is telemetry actually leaving the boat?
+The plugin logs one unconditional line at startup naming its real target:
+```
+[sailkick-boat] sync -> https://sync.sailkick.io org=sailkick bucket=<slug>_raw
+```
+If that shows anything other than the endpoint you expect, a stale config field is the
+usual cause — see the upgrade note above.
+
+Failures reach the **normal server log**, not just the debug channel:
+- `cannot write to <url> — unreachable …; N failed attempt(s), telemetry is buffering
+  on disk` — once per outage, then every 5 min while it lasts, then a `recovered` line.
+- `batch REJECTED (HTTP 401) and quarantined …` — the write token is not valid for that
+  bucket. These are never retried, so they are always logged.
+- `sync: ⚠ writing to <url> — a private address` — a loopback/RFC1918 target, i.e.
+  nothing is reaching the cloud.
+
+Nothing at all in the log means the plugin never started; check it is enabled. The
+status line in Plugin Config carries the same information continuously.
+
+To prove credentials independently of the plugin:
+```bash
+curl -i -XPOST "https://sync.sailkick.io/api/v2/write?org=sailkick&bucket=<slug>_raw&precision=ns" \
+  -H "Authorization: Token $TOKEN" --data-binary "probe,context=vessels.self,self=true,source=manual value=1"
+```
+`204` = good, `401` = token not valid for that bucket.
 
 ## Dev / tests
 ```bash

@@ -14,10 +14,18 @@ const { resolveAccountConfig } = require('./lib/account')
 // Kept as separate modules so a proxy fault can't wedge the data-critical sync.
 
 // Fixed cloud endpoints. Boats never choose these, so they are constants rather than
-// config fields — but every module still reads its option first (see startModules), so
-// a hand-edited plugin-config JSON can override any of them for self-hosting.
+// config fields, and NOTHING in a saved config may override them unless `selfHosted` is
+// explicitly set (see resolveEndpoint).
+//
+// v0.14.3 kept `sync.influxUrl` / `proxy.sailkickUrl` as a silent escape hatch, on the
+// reasoning that a value could only get there by deliberate hand-editing. That was
+// wrong: both were VISIBLE FIELDS before v0.14.0, so every upgraded install still has
+// whatever was typed into them — and since they are no longer in the schema, the owner
+// can neither see nor clear them from the UI. One boat spent a day POSTing valid cloud
+// credentials at a dev LAN address for exactly this reason. Stale wins over intent, so
+// leftovers are now ignored and reported rather than obeyed.
 const SAILKICK_APP_URL = 'https://www.sailkick.io' // signup + mirror upstream
-const SAILKICK_INFLUX_URL = 'https://sync.sailkick.io' // data egress; pairing overrides this
+const SAILKICK_INFLUX_URL = 'https://sync.sailkick.io' // data egress
 
 // Tuning that has a right answer. Deliberately NOT on the config page: a boat owner has
 // no basis to choose these, and a wrong value silently degrades sync or the cache.
@@ -45,15 +53,30 @@ const HISTORY_TUNING = {
   ringSampleSec: 15
 }
 
-// A *cloud* endpoint on loopback means telemetry never leaves the boat. On the wire it
-// is indistinguishable from a normal offline backlog — the spool just grows — so it has
-// to be called out explicitly. (The local history DB is legitimately on 127.0.0.1; this
-// check is only ever applied to the sync path.)
-function isLoopbackUrl (u) {
+// A *cloud* endpoint on a loopback or private address means telemetry never leaves the
+// LAN. On the wire that is indistinguishable from a normal offline backlog — the spool
+// just grows — so it has to be called out explicitly. Covers RFC1918 as well as
+// loopback: the case that actually bit was a 192.168.x dev box, which a loopback-only
+// check sailed straight past. (The local history DB is legitimately on 127.0.0.1; this
+// is only ever applied to the sync path.)
+function isPrivateHostUrl (u) {
   try {
     const h = new URL(u).hostname.replace(/^\[|\]$/g, '')
-    return h === 'localhost' || h === '::1' || /^127\./.test(h)
+    if (h === 'localhost' || h === '::1' || /^127\./.test(h)) return true
+    if (/^10\./.test(h) || /^192\.168\./.test(h)) return true
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true
+    return false
   } catch { return false }
+}
+
+// Endpoint resolution with one rule: the constant wins unless self-hosting is declared.
+// Returns { url, ignored } — `ignored` is the stale value we refused, so the caller can
+// say so out loud instead of leaving the owner to guess why nothing arrives.
+function resolveEndpoint (configured, constant, selfHosted) {
+  const v = typeof configured === 'string' ? configured.trim() : ''
+  if (!v || v === constant) return { url: constant, ignored: null }
+  if (selfHosted) return { url: v, ignored: null }
+  return { url: constant, ignored: v }
 }
 
 module.exports = function (app) {
@@ -151,17 +174,17 @@ module.exports = function (app) {
     const store = p.dataDir || p.storeDir || undefined
     const spoolDir = s.spoolDir || (p.dataDir ? path.join(p.dataDir, 'spool') : undefined)
 
+    // Self-hosting is opt-in and explicit. Without it, a saved endpoint is treated as a
+    // leftover from an older version rather than as intent.
+    const selfHosted = s.selfHosted === true || p.selfHosted === true
+    const influx = resolveEndpoint(s.influxUrl, SAILKICK_INFLUX_URL, selfHosted)
+    const upstream = resolveEndpoint(p.sailkickUrl, SAILKICK_APP_URL, selfHosted)
+
     // --- sync module (isolated: its failure must not affect the proxy) ---
-    // Pairing wins over hand-written fields; hand-written fields win over the constants.
     if (s.enabled !== false) {
       const syncOpts = {
         ...SYNC_TUNING,
-        // The cloud endpoint is fleet-wide and fixed. A pasted or cached bundle can
-        // never set it — the app's signup screen hands out its own http://localhost:8086,
-        // and a boat that believed it would spool to loopback forever, looking healthy.
-        // `sync.influxUrl` survives only as a self-hosting escape hatch: it is not in
-        // the schema, so it cannot arrive by pasting, only by editing the config JSON.
-        influxUrl: s.influxUrl || SAILKICK_INFLUX_URL,
+        influxUrl: influx.url,
         org: b.org || s.org || SYNC_TUNING.org,
         bucket: b.bucket || s.bucket,
         token: b.writeToken || s.token,
@@ -174,9 +197,17 @@ module.exports = function (app) {
         retryMinMs: s.retryMinMs || SYNC_TUNING.retryMinMs,
         retryMaxMs: s.retryMaxMs || SYNC_TUNING.retryMaxMs
       }
-      if (isLoopbackUrl(syncOpts.influxUrl)) {
-        syncWarning = `sync: ⚠ writing to ${syncOpts.influxUrl} — telemetry is NOT reaching the cloud`
-        ;(app.error || console.error)(`[sailkick-boat] sync target ${syncOpts.influxUrl} is a local address — telemetry will not reach the cloud`)
+      // One unconditional line naming the actual target. This is the single most useful
+      // thing in the log: it would have shown the stale 192.168.x address instantly,
+      // instead of a day spent inferring it from an absence of errors.
+      console.log(`[sailkick-boat] sync -> ${syncOpts.influxUrl} org=${syncOpts.org} bucket=${syncOpts.bucket || '(none)'}${selfHosted ? ' [self-hosted]' : ''}`)
+
+      if (influx.ignored) {
+        syncWarning = `sync: ignoring stale influxUrl ${influx.ignored} — using ${influx.url}`
+        ;(app.error || console.error)(`[sailkick-boat] ignoring sync.influxUrl "${influx.ignored}" left over from an older config — using ${influx.url}. Set sync.selfHosted:true to keep your own endpoint.`)
+      } else if (isPrivateHostUrl(syncOpts.influxUrl)) {
+        syncWarning = `sync: ⚠ writing to ${syncOpts.influxUrl} — a private address, telemetry is NOT reaching the cloud`
+        ;(app.error || console.error)(`[sailkick-boat] sync target ${syncOpts.influxUrl} is a loopback/private address — telemetry will not reach the cloud`)
       }
       try { sync = createSync(app, syncOpts); sync.start() } catch (e) {
         (app.error || console.error)('[sailkick-boat] sync start failed: ' + e.message)
@@ -189,8 +220,11 @@ module.exports = function (app) {
       const oldSeed = p.seed || {}
       const oldPrefetch = p.prefetch || {}
       const oldHistory = p.history || {}
+      if (upstream.ignored) {
+        ;(app.error || console.error)(`[sailkick-boat] ignoring proxy.sailkickUrl "${upstream.ignored}" left over from an older config — mirroring ${upstream.url}. Set proxy.selfHosted:true to keep your own server.`)
+      }
       const pOpts = {
-        sailkickUrl: p.sailkickUrl || SAILKICK_APP_URL,
+        sailkickUrl: upstream.url,
         storeDir: store,
         proxyPort: p.proxyPort == null ? 8080 : p.proxyPort,
         localSignalkUrl: p.localSignalkUrl || 'http://127.0.0.1:3000',

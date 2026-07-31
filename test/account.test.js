@@ -102,3 +102,83 @@ test('accountConfigured reflects whether sync has credentials', () => {
   assert.strictEqual(accountConfigured(app, { slug: 'mimi' }), false)
   assert.strictEqual(accountConfigured(app, { slug: 'mimi', writeToken: 'WTOK' }), true)
 })
+
+// --- endpoint pinning (v0.14.4) -------------------------------------------------
+// A pre-0.14 install still carries whatever was typed into the old, now-removed
+// influxUrl / sailkickUrl fields. Those are leftovers, not intent: obeying them sent a
+// boat's telemetry to a dev LAN box for a day. Exercised through the real plugin so the
+// precedence in startModules is what's under test, not a reimplementation of it.
+const os2 = require('node:os')
+
+function bootPlugin (config) {
+  for (const k of Object.keys(require.cache)) delete require.cache[k]
+  const seen = {}
+  for (const [mod, key] of [['../lib/sync', 'createSync'], ['../lib/history', 'createHistory']]) {
+    const p = require.resolve(require('node:path').join(__dirname, mod))
+    require.cache[p] = {
+      id: p,
+      filename: p,
+      loaded: true,
+      exports: {
+        [key]: (app, opts) => {
+          seen[key] = opts
+          return { start () {}, stop () {}, status: () => '', available: () => false }
+        }
+      }
+    }
+  }
+  const dir = fs.mkdtempSync(require('node:path').join(os2.tmpdir(), 'sk-pin-'))
+  const errors = []
+  let status = ''
+  const app = {
+    debug () {}, error (m) { errors.push(m) }, getDataDirPath: () => dir,
+    setPluginStatus (s) { status = s }, selfId: 'u',
+    subscriptionmanager: { subscribe () {} }, getSelfPath: () => null
+  }
+  const pl = require('../index.js')(app)
+  pl.start(config)
+  pl.stop()
+  return { syncOpts: seen.createSync, errors, status }
+}
+
+const CLOUD = 'https://sync.sailkick.io'
+const ACCOUNT = { slug: 'addiction', writeToken: 'WTOK' }
+
+test('a stale sync.influxUrl from an older config is ignored, not obeyed', () => {
+  const { syncOpts, errors, status } = bootPlugin({
+    account: ACCOUNT,
+    sync: { enabled: true, influxUrl: 'http://192.168.5.222:8086', bucket: 'myboat_raw', token: 'OLD' },
+    proxy: { enabled: false }
+  })
+  assert.strictEqual(syncOpts.influxUrl, CLOUD, 'the fleet endpoint wins')
+  assert.strictEqual(syncOpts.bucket, 'addiction_raw', 'bucket comes from the account, not the stale config')
+  assert.strictEqual(syncOpts.token, 'WTOK')
+  assert.ok(errors.some((e) => /ignoring sync\.influxUrl.*192\.168\.5\.222/.test(e)), 'says so in the log')
+  assert.match(status, /ignoring stale influxUrl/, 'and in the status line')
+})
+
+test('selfHosted:true honours an explicit endpoint', () => {
+  const { syncOpts, errors } = bootPlugin({
+    account: ACCOUNT,
+    sync: { enabled: true, selfHosted: true, influxUrl: 'https://influx.self.example' },
+    proxy: { enabled: false }
+  })
+  assert.strictEqual(syncOpts.influxUrl, 'https://influx.self.example')
+  assert.ok(!errors.some((e) => /ignoring/.test(e)), 'deliberate self-hosting is not nagged about')
+})
+
+test('a private-range self-hosted endpoint still warns', () => {
+  const { status } = bootPlugin({
+    account: ACCOUNT,
+    sync: { enabled: true, selfHosted: true, influxUrl: 'http://192.168.5.222:8086' },
+    proxy: { enabled: false }
+  })
+  assert.match(status, /private address/, 'RFC1918 is flagged, not just loopback')
+})
+
+test('no endpoint configured: the constant is used silently', () => {
+  const { syncOpts, errors, status } = bootPlugin({ account: ACCOUNT, proxy: { enabled: false } })
+  assert.strictEqual(syncOpts.influxUrl, CLOUD)
+  assert.strictEqual(errors.length, 0)
+  assert.ok(!/⚠|ignoring/.test(status))
+})
