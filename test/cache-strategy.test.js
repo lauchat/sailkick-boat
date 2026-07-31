@@ -90,3 +90,79 @@ test('circuit breaker: a successful fetch clears the breaker', async () => {
 
   await new Promise((res) => srv.close(res))
 })
+
+// --- velocity tiles are pinned, not network-first (v0.14.5) ----------------------
+// The app moved velocity + lightning behind its own origin (/api/velocity,
+// /api/lightning). Velocity TILES embed the forecast run id in the path, so a URL's
+// bytes never change — pinning them is what makes the wind field work offline. The
+// manifest resolves run=latest and must stay live, or the boat sticks to a stale run.
+const { isNetworkFirst, isImmutableApi } = require('../lib/proxy')
+
+test('strategy split: velocity tiles pinned, everything else under /api live', () => {
+  const pinned = [
+    '/api/velocity/tiles/wind/2026080100/3/4/5/12.f32',
+    '/api/velocity/tiles/current/2026073118/0/0/0/0.f32'
+  ]
+  const live = [
+    '/api/velocity/manifest?layer=wind&run=latest', // must NOT pin — resolves "latest"
+    '/api/lightning/lightning?bbox=1,2,3,4&since=3600',
+    '/api/ais', '/api/config', '/api/wind', '/api/forecast', '/api/assets'
+  ]
+  const cacheFirst = ['/tiles/bathy/3/4/5.png', '/index.html', '/health', '/terrain/layer.json']
+
+  for (const p of pinned) {
+    assert.ok(isImmutableApi(p), `${p} is immutable`)
+    assert.strictEqual(isNetworkFirst(p), false, `${p} must be cache-first`)
+  }
+  for (const p of live) {
+    assert.strictEqual(isNetworkFirst(p), true, `${p} must stay network-first`)
+    assert.strictEqual(isImmutableApi(p), false, `${p} is not immutable`)
+  }
+  for (const p of cacheFirst) {
+    assert.strictEqual(isNetworkFirst(p), false, `${p} is not an /api path`)
+  }
+})
+
+test('a velocity tile is served from disk offline, and only fetched once online', async () => {
+  let hits = 0
+  const srv = http.createServer((req, res) => {
+    hits++
+    res.setHeader('content-type', 'application/octet-stream')
+    res.end(Buffer.from([1, 2, 3, 4]))
+  })
+  await listen(srv)
+  const up = `http://127.0.0.1:${srv.address().port}`
+  const storeDir = tmpStore()
+  const reqPath = '/api/velocity/tiles/wind/2026080100/3/4/5/12.f32'
+  const opts = { storeDir, upstream: up, reqPath, networkFirst: isNetworkFirst(reqPath) }
+
+  let r = await getResource(opts)
+  assert.strictEqual(r.cacheState, 'MISS')
+  assert.strictEqual(hits, 1)
+
+  r = await getResource(opts)
+  assert.strictEqual(r.cacheState, 'HIT', 'panning again must not refetch the whole wind field')
+  assert.strictEqual(hits, 1, 'still one upstream request')
+
+  await new Promise((res) => srv.close(res)) // uplink down
+  r = await getResource({ ...opts, timeoutMs: 800 })
+  assert.strictEqual(r.cacheState, 'HIT', 'wind field still renders offline')
+  assert.deepStrictEqual([...r.buffer], [1, 2, 3, 4])
+})
+
+test('a bake announcement does not churn immutable velocity tiles', async () => {
+  let body = 'first'
+  const srv = http.createServer((req, res) => { res.setHeader('content-type', 'application/octet-stream'); res.end(body) })
+  await listen(srv)
+  const up = `http://127.0.0.1:${srv.address().port}`
+  const storeDir = tmpStore()
+  const reqPath = '/api/velocity/tiles/wind/2026080100/1/1/1/0.f32'
+
+  await getResource({ storeDir, upstream: up, reqPath, networkFirst: false })
+  body = 'second'
+  // The mirror passes invalidatedAt:0 for immutable paths even when the app id changes.
+  const r = await getResource({ storeDir, upstream: up, reqPath, networkFirst: false, invalidatedAt: 0 })
+  assert.strictEqual(r.cacheState, 'HIT')
+  assert.strictEqual(r.buffer.toString(), 'first', 'run-keyed bytes are never re-fetched')
+  await new Promise((res) => srv.close(res))
+})

@@ -63,10 +63,19 @@ comes from the cloud **announcing bakes**, not from a clock:
 `X-Sailkick-Cache` reports `HIT` / `MISS` / `UPDATED` / `STALE` / `LIVE` per response.
 
 **Static vs dynamic — two strategies.** Tiles and app assets are **cache-first**
-(pinned, offline forever). Dynamic `/api/*` data (AIS, weather) is **network-first**:
-fetched live every time online (so AIS/weather never go stale), with the last
-response kept only as an **offline fallback** (`STALE`). Local `/api/history` and the
-patched `/api/config` are served specially (above).
+(pinned, offline forever). Dynamic `/api/*` data (AIS, weather, lightning) is
+**network-first**: fetched live every time online (so it never goes stale), with the
+last response kept only as an **offline fallback** (`STALE`). Local `/api/history` and
+the patched `/api/config` are served specially (above).
+
+**Exception — velocity tiles are pinned.** The app serves its wind/current field from
+`/api/velocity/tiles/<layer>/<runId>/<z>/<x>/<y>/<hour>.f32`. The forecast **run id is
+in the path**, so a URL's bytes never change — a new run means new URLs. Those are
+cache-first like map tiles: each tile downloads once instead of on every pan, and the
+wind particles + storm field keep rendering **offline**. The velocity *manifest*
+(`?run=latest`) stays network-first, or the boat would pin itself to a stale run
+forever. Nothing prefetches velocity tiles yet, so offline wind covers only what you
+have panned over, and old runs are not pruned.
 
 **Offline circuit breaker.** Some boat routers return errors (or hang) for outbound
 requests when the uplink is down, instead of failing cleanly. Once a fetch fails, the
