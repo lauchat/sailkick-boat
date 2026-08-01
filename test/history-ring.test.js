@@ -55,12 +55,11 @@ test('ring: window trims samples older than windowSec', () => {
   ring.destroy()
 })
 
-test('history: picks the ring when no InfluxDB token but a telemetry source exists', async () => {
+test('history: serves the ring whenever a telemetry source exists', async () => {
   const src = fakeSource({ sogKt: 4, cogDeg: 10, headingDeg: 5, awsKt: 8, awaDeg: 60, depthM: 20, lat: 36.9, lon: -76.3 })
   const h = createHistory(app, { token: '', ringSource: src, ringSampleSec: 99999 })
   h.start()
   assert.strictEqual(h.available(), true, 'ring makes history available without a DB')
-  assert.strictEqual(h._mode(), 'ring')
 
   const cap = () => ({ statusCode: 200, headers: {}, body: '', writableFinished: false, on () {}, setHeader (k, v) { this.headers[k] = v }, end (b) { this.body = b || ''; this.writableFinished = true } })
   const res = cap()
@@ -73,17 +72,24 @@ test('history: picks the ring when no InfluxDB token but a telemetry source exis
   h.stop()
 })
 
-test('history: prefers InfluxDB when a token is configured (ring not used)', () => {
-  const src = fakeSource({ sogKt: 4, lat: 1, lon: 2 })
-  const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: 'http://127.0.0.1:1', ringSource: src })
+// Until v0.15.0 a read token switched history to a local InfluxDB, which for a bucket of
+// older data returned nothing (the app only asks for a relative window clamped to 24 h)
+// AND turned off the working live ring. A leftover token must never do that again.
+test('history: a stale InfluxDB token in the config cannot displace the ring', async () => {
+  const src = fakeSource({ sogKt: 4, cogDeg: 10, headingDeg: 5, awsKt: 8, awaDeg: 60, lat: 1, lon: 2 })
+  const h = createHistory(app, { token: 'STALE', bucket: 'bandg', influxUrl: 'http://127.0.0.1:1', ringSource: src, ringSampleSec: 99999 })
   h.start()
-  assert.strictEqual(h._mode(), 'influx', 'token present → InfluxDB, not ring')
   assert.strictEqual(h.available(), true)
+  const res = { statusCode: 200, headers: {}, body: '', writableFinished: false, on () {}, setHeader (k, v) { this.headers[k] = v }, end (b) { this.body = b || ''; this.writableFinished = true } }
+  await h.handleSeries({ url: '/api/history/series?window=3600s&every=30s' }, res)
+  const j = JSON.parse(res.body)
+  assert.strictEqual(res.statusCode, 200, 'no attempt to reach the dead InfluxDB at :1')
+  assert.ok(j.series.sog, 'served live from the ring')
   h.stop()
 })
 
-test('history: unavailable when neither InfluxDB nor a telemetry source is present', async () => {
-  const h = createHistory(app, { token: '' }) // no ringSource
+test('history: unavailable with no telemetry source at all', async () => {
+  const h = createHistory(app, {}) // no ringSource
   h.start()
   assert.strictEqual(h.available(), false)
   const res = { statusCode: 200, headers: {}, body: '', writableFinished: false, on () {}, setHeader (k, v) { this.headers[k] = v }, end (b) { this.body = b || ''; this.writableFinished = true } }
@@ -163,7 +169,6 @@ test('history: ring log defaults under storeDir/history; ringDir overrides; ring
   // default: under the configured storeDir, in a history/ folder (on the SSD with tiles)
   const def = createHistory(appDD, { token: '', ringSource: src, ringSampleSec: 99999, storeDir: store })
   def.start()
-  assert.strictEqual(def._mode(), 'ring')
   assert.ok(fs.existsSync(path.join(store, 'history', 'history-ring.jsonl')), 'ring log under <storeDir>/history')
   def.stop()
 
@@ -179,7 +184,6 @@ test('history: ring log defaults under storeDir/history; ringDir overrides; ring
   fs.rmSync(path.join(store, 'history'), { recursive: true, force: true })
   const off = createHistory(appDD, { token: '', ringSource: src, ringPersist: false, ringSampleSec: 99999, storeDir: store })
   off.start()
-  assert.strictEqual(off._mode(), 'ring')
   assert.ok(!fs.existsSync(path.join(store, 'history', 'history-ring.jsonl')), 'ringPersist:false writes nothing')
   off.stop()
 

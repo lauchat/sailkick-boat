@@ -9,202 +9,105 @@ const { createProxy } = require('../lib/proxy')
 
 const app = { debug () {} }
 
-// A fake InfluxDB /api/v2/query that returns annotated CSV for whichever query
-// shape it recognises (series vs track), so we exercise the real Flux→JSON path.
-function fakeInflux () {
-  const srv = http.createServer((req, res) => {
-    let body = ''
-    req.on('data', (c) => (body += c))
-    req.on('end', () => {
-      res.setHeader('Content-Type', 'application/csv')
-      if (body.includes('pivot')) {
-        // track query → position pivot with lat/lon columns
-        res.end(
-          '#datatype,string,long,dateTime:RFC3339,double,double\r\n' +
-          ',result,table,_time,lat,lon\r\n' +
-          ',_result,0,2026-07-19T10:00:00Z,36.95,-76.19\r\n' +
-          ',_result,0,2026-07-19T10:00:30Z,36.96,-76.18\r\n'
-        )
-      } else {
-        // series query → long format with _measurement + _value
-        res.end(
-          '#datatype,string,long,dateTime:RFC3339,double,string\r\n' +
-          ',result,table,_time,_value,_measurement\r\n' +
-          ',_result,0,2026-07-19T10:00:00Z,5,navigation.speedOverGround\r\n' +
-          ',_result,1,2026-07-19T10:00:30Z,6,navigation.speedOverGround\r\n' +
-          ',_result,2,2026-07-19T10:00:00Z,1.5707963,navigation.headingTrue\r\n'
-        )
-      }
-    })
-  })
-  return srv
-}
+// Local history has exactly one source: the ring, sampled from live BoatState. Until
+// v0.15.0 a configured InfluxDB read token displaced it — which for a bucket of older
+// data meant Trends served nothing (the app only ever asks for a relative window,
+// clamped to 24 h) while the working live ring sat switched off. These tests pin the
+// source down so that cannot come back.
+const fakeSource = (state) => ({ getState: () => state })
+const ringOpts = (state) => ({ ringSource: fakeSource(state), ringSampleSec: 99999, ringPersist: false })
+const LIVE = { sogKt: 5, cogDeg: 90, headingDeg: 88, awsKt: 12, awaDeg: 40, depthM: 18, lat: 36.95, lon: -76.19 }
 
-test('history: available() gates on token/url/bucket', () => {
-  const h1 = createHistory(app, { token: '' }); h1.start()
-  assert.strictEqual(h1.available(), false, 'no token → not available')
-  const h2 = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: 'http://x' }); h2.start()
-  assert.strictEqual(h2.available(), true)
+const capture = () => ({
+  statusCode: 200,
+  headers: {},
+  body: '',
+  writableFinished: false,
+  on () {},
+  setHeader (k, v) { this.headers[k] = v },
+  end (b) { this.body = b || ''; this.writableFinished = true }
 })
 
-test('history: getSeries maps measurements→channels with unit conversion', async () => {
-  const influx = fakeInflux()
-  await new Promise((r) => influx.listen(0, r))
-  const port = influx.address().port
-  const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: `http://127.0.0.1:${port}` })
-  h.start()
-  const r = await h._getSeries({ windowSec: 3600, everySec: 30 })
-  assert.ok(r.ok)
-  assert.ok(r.series.sog, 'sog channel present')
-  assert.ok(Math.abs(r.series.sog[0][1] - 5 * 1.94384) < 1e-3, '5 m/s → knots')
-  assert.ok(r.series.heading, 'heading channel present')
-  assert.ok(Math.abs(r.series.heading[0][1] - 90) < 0.01, 'pi/2 rad → 90°')
-  influx.close()
+test('history: available() gates on having a telemetry source, not on a token', () => {
+  const none = createHistory(app, {}); none.start()
+  assert.strictEqual(none.available(), false, 'no telemetry → falls through to the mirror')
+
+  const ring = createHistory(app, ringOpts(LIVE)); ring.start()
+  assert.strictEqual(ring.available(), true, 'telemetry alone is enough — no database needed')
+  ring.stop()
 })
 
-test('history: getTrack pivots lat/lon into ordered points', async () => {
-  const influx = fakeInflux()
-  await new Promise((r) => influx.listen(0, r))
-  const port = influx.address().port
-  const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: `http://127.0.0.1:${port}` })
+test('history: an InfluxDB token in the config no longer changes the source', async () => {
+  const h = createHistory(app, { ...ringOpts(LIVE), token: 'STALE', bucket: 'bandg', influxUrl: 'http://127.0.0.1:1' })
   h.start()
-  const r = await h._getTrack({ windowSec: 3600 })
-  assert.ok(r.ok)
-  assert.strictEqual(r.track.length, 2)
-  assert.ok(Math.abs(r.track[0].lat - 36.95) < 1e-9 && Math.abs(r.track[0].lon + 76.19) < 1e-9)
-  assert.ok(r.track[0].t < r.track[1].t, 'sorted by time')
-  influx.close()
+  const res = capture()
+  await h.handleSeries({ url: '/api/history/series?window=3600s&every=30s' }, res)
+  // :1 has nothing listening — reaching it would hang or 502 rather than answer.
+  assert.strictEqual(res.statusCode, 200, 'no attempt to query the configured InfluxDB')
+  assert.ok(JSON.parse(res.body).series.sog, 'served live from the ring')
+  h.stop()
 })
 
 test('history: handleSeries returns the app JSON envelope; 503 when unavailable', async () => {
-  const influx = fakeInflux()
-  await new Promise((r) => influx.listen(0, r))
-  const port = influx.address().port
-  const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: `http://127.0.0.1:${port}` })
-  h.start()
-  const cap = () => {
-    const res = { statusCode: 200, headers: {}, body: '', writableFinished: false, on () {}, setHeader (k, v) { this.headers[k] = v }, end (b) { this.body = b || ''; this.writableFinished = true } }
-    return res
-  }
-  const ok = cap()
-  await h.handleSeries({ url: '/api/history/series?window=3600s&every=30s' }, ok)
-  const j = JSON.parse(ok.body)
-  assert.strictEqual(ok.statusCode, 200)
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  const res = capture()
+  await h.handleSeries({ url: '/api/history/series?window=1800s&every=15s' }, res)
+  assert.strictEqual(res.statusCode, 200)
+  const j = JSON.parse(res.body)
   assert.strictEqual(j.ok, true)
-  assert.strictEqual(j.windowSec, 3600)
-  assert.strictEqual(j.everySec, 30)
-  assert.ok(j.series.sog && j.series.heading)
+  assert.strictEqual(j.windowSec, 1800, 'window echoed back')
+  assert.strictEqual(j.everySec, 15)
+  assert.ok(typeof j.from === 'number' && typeof j.to === 'number', 'from/to present')
+  assert.ok(j.series && typeof j.series === 'object')
+  h.stop()
 
-  const off = createHistory(app, { token: '' }); off.start()
-  const r503 = cap()
-  await off.handleSeries({ url: '/api/history/series' }, r503)
-  assert.strictEqual(r503.statusCode, 503)
-  assert.strictEqual(JSON.parse(r503.body).code, 'history-unavailable')
-  influx.close()
+  const off = createHistory(app, {}); off.start()
+  const res2 = capture()
+  await off.handleSeries({ url: '/api/history/series' }, res2)
+  assert.strictEqual(res2.statusCode, 503)
+  assert.strictEqual(JSON.parse(res2.body).code, 'history-unavailable')
+})
+
+test('history: handleTrack returns ordered points from the ring', async () => {
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  const res = capture()
+  await h.handleTrack({ url: '/api/history/track?window=3600s' }, res)
+  assert.strictEqual(res.statusCode, 200)
+  const j = JSON.parse(res.body)
+  assert.strictEqual(j.ok, true)
+  assert.ok(Array.isArray(j.track))
+  if (j.track.length) {
+    assert.ok(Number.isFinite(j.track[0].lat) && Number.isFinite(j.track[0].lon))
+    assert.ok(Number.isFinite(j.track[0].t))
+  }
+  h.stop()
 })
 
 test('proxy: routes /api/history to local history when available, else mirrors', async () => {
-  // upstream mirror that would answer /api/history if we fell through
   const upstream = http.createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, from: 'CLOUD-MIRROR' })) })
   await new Promise((r) => upstream.listen(0, r))
   const upPort = upstream.address().port
 
-  const influx = fakeInflux()
-  await new Promise((r) => influx.listen(0, r))
-  const inPort = influx.address().port
-
-  // history CONFIGURED → served locally
-  const h = createHistory(app, { token: 't', bucket: 'bandg', influxUrl: `http://127.0.0.1:${inPort}` }); h.start()
-  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: h, storeDir: '/tmp/sk-hist-test-store', manifest: { enabled: false }, seed: { enabled: false } })
-  proxy.start()
-  const local = await new Promise((resolve) => {
+  const callTrack = (proxy) => new Promise((resolve) => {
     const req = { url: '/api/history/track?window=3600s', method: 'GET', headers: {} }
     const res = { statusCode: 200, headers: {}, chunks: '', on () {}, setHeader (k, v) { this.headers[k] = v }, writableFinished: false, end (b) { this.chunks = b || ''; this.writableFinished = true; resolve(this) } }
     proxy._serveMirror(req, res)
   })
-  const lj = JSON.parse(local.chunks)
-  assert.ok(lj.ok && Array.isArray(lj.track), 'served from local history (has track array)')
-  assert.ok(!lj.from, 'did NOT come from the cloud mirror')
 
-  // history UNCONFIGURED → falls through to mirror
-  const hoff = createHistory(app, { token: '' }); hoff.start()
+  // telemetry present → served locally from the ring
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: h, storeDir: '/tmp/sk-hist-test-store', manifest: { enabled: false }, seed: { enabled: false } })
+  proxy.start()
+  const local = JSON.parse((await callTrack(proxy)).chunks)
+  assert.ok(local.ok && Array.isArray(local.track), 'served from local history')
+  assert.ok(!local.from, 'did NOT come from the cloud mirror')
+
+  // no telemetry → falls through to the mirror, so an online boat is never worse off
+  const hoff = createHistory(app, {}); hoff.start()
   const proxy2 = createProxy(app, { sailkickUrl: `http://127.0.0.1:${upPort}`, proxyPort: 0, history: hoff, storeDir: '/tmp/sk-hist-test-store2', manifest: { enabled: false }, seed: { enabled: false } })
   proxy2.start()
-  const fell = await new Promise((resolve) => {
-    const req = { url: '/api/history/track?window=3600s', method: 'GET', headers: {} }
-    const res = { statusCode: 200, headers: {}, chunks: '', on () {}, setHeader (k, v) { this.headers[k] = v }, writableFinished: false, end (b) { this.chunks = b || ''; this.writableFinished = true; resolve(this) } }
-    proxy2._serveMirror(req, res)
-  })
-  assert.strictEqual(JSON.parse(fell.chunks).from, 'CLOUD-MIRROR', 'unconfigured history falls through to mirror')
+  const fell = JSON.parse((await callTrack(proxy2)).chunks)
+  assert.strictEqual(fell.from, 'CLOUD-MIRROR', 'unavailable history falls through to the mirror')
 
-  proxy.stop(); proxy2.stop(); influx.close(); upstream.close()
-})
-
-// --- archive fields exposed in the UI (v0.14.7) -----------------------------------
-// The local-InfluxDB archive is now configurable from the config page (URL, org,
-// bucket) with defaults pre-filled. The hazard that needs a test: the Signal K UI
-// writes every schema default on save, so a boat whose archive lives in org
-// "addiction" / bucket "bandg" under the old nested proxy.history block would have
-// those shadowed by a freshly-written `historyOrg: "signalk"` — and the archive would
-// go quiet with nothing to explain it.
-const fsA = require('node:fs')
-const osA = require('node:os')
-const pathA = require('node:path')
-
-function historyOptsFor (config) {
-  for (const k of Object.keys(require.cache)) delete require.cache[k]
-  let seen = null
-  for (const [mod, key, stub] of [
-    ['../lib/history', 'createHistory', () => ({ start () {}, stop () {}, status: () => '', available: () => false })],
-    ['../lib/sync', 'createSync', () => ({ start () {}, stop () {}, status: () => '' })]
-  ]) {
-    const rp = require.resolve(pathA.join(__dirname, mod))
-    require.cache[rp] = { id: rp, filename: rp, loaded: true, exports: { [key]: (app, o) => { if (key === 'createHistory') seen = o; return stub() } } }
-  }
-  const dir = fsA.mkdtempSync(pathA.join(osA.tmpdir(), 'sk-hist-'))
-  const app = {
-    debug () {}, error () {}, getDataDirPath: () => dir, setPluginStatus () {},
-    selfId: 'u', subscriptionmanager: { subscribe () {} }, getSelfPath: () => null
-  }
-  const pl = require('../index.js')(app)
-  pl.start(config)
-  pl.stop()
-  return seen
-}
-
-const ACC = { slug: 'addiction', writeToken: 'W' }
-
-test('a legacy archive survives the UI writing the new defaults over it', () => {
-  const o = historyOptsFor({
-    account: ACC,
-    proxy: {
-      enabled: true,
-      proxyPort: 0,
-      historyToken: 'RTOK',
-      historyInfluxUrl: 'http://127.0.0.1:8086', // same as default
-      historyOrg: 'signalk', // default, written by the UI on save
-      historyBucket: 'signalk', // default, written by the UI on save
-      history: { org: 'addiction', bucket: 'bandg', token: 'RTOK' } // the real archive
-    }
-  })
-  assert.strictEqual(o.org, 'addiction', 'the archive org is not lost to a written default')
-  assert.strictEqual(o.bucket, 'bandg')
-  assert.strictEqual(o.token, 'RTOK')
-})
-
-test('an explicitly changed field beats the legacy value', () => {
-  const o = historyOptsFor({
-    account: ACC,
-    proxy: { enabled: true, proxyPort: 0, historyToken: 'RTOK', historyOrg: 'newco', historyBucket: 'newbucket', history: { org: 'addiction', bucket: 'bandg' } }
-  })
-  assert.strictEqual(o.org, 'newco', 'the owner can move the archive')
-  assert.strictEqual(o.bucket, 'newbucket')
-})
-
-test('no token means the ring, with archive fields at their defaults', () => {
-  const o = historyOptsFor({ account: ACC, proxy: { enabled: true, proxyPort: 0 } })
-  assert.strictEqual(o.token, '', 'the token is the switch')
-  assert.strictEqual(o.influxUrl, 'http://127.0.0.1:8086')
-  assert.strictEqual(o.org, 'signalk')
-  assert.strictEqual(o.bucket, 'signalk')
+  h.stop(); proxy.stop(); proxy2.stop(); upstream.close()
 })

@@ -27,7 +27,7 @@ One Signal K plugin, independently-toggleable modules — so the boat stays
   same contracts as the cloud, offline-first):
   - **`/ws/telemetry`** — the app's live telemetry bus, fed from local SignalK.
   - **`/api/history/{series,track}`** — the app's Trends panel + track, served
-    from the boat's local InfluxDB (or a DB-less telemetry ring) — full local history.
+    from a live ring sampled on the boat — full local history, no database.
 
 Kept as separate modules so a proxy fault can't wedge the data-critical sync path.
 
@@ -139,37 +139,22 @@ config passes through untouched. (Hand-edit `proxy.openAccess: false` to keep th
 login gate — there is no toggle, since the gate cannot complete over the mirror anyway.)
 
 ## Local history (offline Trends + track)
-Two ways, chosen automatically:
-- **Read token set** → full history queried from a **local InfluxDB** (e.g. a bucket
-  written by `signalk-to-influxdb-v2`).
-- **No token, telemetry on** → a **DB-less ring** sampled from live telemetry (the
-  same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
-  **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
-  (`historyAvailable` reports true either way, so the app shows the Trends panel.)
-  Same eight channels as the InfluxDB path, `stw` included.
+**One source: a live ring**, sampled from the same BoatState that feeds `/ws/telemetry`
+— no database, works on a Victron GX with nothing else installed. `historyAvailable` is
+forced on so the app shows the Trends panel, and the eight channels match what the cloud
+serves, `stw` included.
 
-**Serving an archive.** Set `historyToken` and the three `history*` fields point at any
-InfluxDB holding `signalk-to-influxdb-v2`-schema data — a still-running local database,
-or a bucket you imported an old logbook into. That is the archive's real value: history
-from before this boat ever synced to the cloud. The token is the switch; blank means the
-built-in ring. The plugin logs which source it chose at startup:
+There is deliberately **no way to point this at a local InfluxDB**. Until v0.15.0 a read
+token did exactly that, and it was a trap: the app only ever asks for a *relative* window
+clamped to 24 h, so aiming it at a bucket of older data matched nothing — Trends went
+blank **and** the working live ring was switched off. If you still have a token in your
+config it is now inert; the plugin logs `history -> live ring` regardless.
 
-```
-[sailkick-boat] history -> archive http://127.0.0.1:8086 org=addiction bucket=bandg
-[sailkick-boat] history -> built-in ring (no archive token set)
-```
-
-Upgrading from before 0.14.7, when these lived in a hidden `proxy.history` block: your
-saved values still win over the newly pre-filled defaults, so an archive in a
-non-default org/bucket is not silently lost when the config UI writes `signalk` over it.
-The plugin says so in the log — copy the values into the visible fields when convenient.
-
-**Do you actually need a local InfluxDB?** For *live* trends, usually not. The app never requests finer
-than `every=5s` over a `window` of 24 h, and the ring's floor at that window is 2 s — so
-set `ringSampleSec: 5` and it matches anything the UI can draw, from live state, with no
-database to run. A local InfluxDB is worth it only for history predating cloud sync,
-more than 30 days offline, or channels outside BoatState (engine, batteries) that the
-Trends panel does not chart anyway.
+A local InfluxDB is not a competitor here anyway. The app never requests finer than
+`every=5s` over a 24 h window, and the ring's floor at that window is 2 s — set
+`ringSampleSec: 5` and it matches anything the UI can draw, from live state. What an old
+database *is* good for is its contents ending up **in the cloud**, where the app can
+query them properly. See the roadmap note below.
 
 **True wind comes from your instruments.** If the boat publishes
 `environment.wind.speedTrue` / `directionTrue`, those are stored verbatim — a wind
@@ -190,14 +175,14 @@ water. (Before v0.14.6 the derivation used SOG, which in 3 kt of foul tide skewe
 
 The sailkick app is deployment-agnostic about history: *central Influx in the
 cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge that
-serves the app's history endpoints from its **own** data (local InfluxDB or the ring):
+serves the app's history endpoints from its **own** live data:
 ```
 GET /api/history/series?window=3600s&every=30s -> { series: { sog|heading|tws|… : [[tMs,val],…] } }
 GET /api/history/track?window=3600s            -> { track: [{ t, lat, lon }, …] }
 ```
 Same JSON the cloud returns, so the browser can't tell the difference — but it
-works **offline** with the boat's own data. Only when neither a local InfluxDB nor
-telemetry is available do these paths **fall through to the cloud mirror**, so an
+works **offline** with the boat's own data. Only when no telemetry source is
+available at all do these paths **fall through to the cloud mirror**, so an
 online boat is never worse off than before.
 
 ## Setup: register on the web, then paste the token
@@ -240,17 +225,11 @@ in `index.js`.
 - **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
   (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
   `prefetchDetailZoom`
-- **History archive** (optional): `historyToken`, `historyInfluxUrl`
-  (default `http://127.0.0.1:8086`), `historyOrg` + `historyBucket` (default `signalk`,
-  matching `signalk-to-influxdb-v2`)
 
 `dataDir` is the one storage location — cached maps, the telemetry spool and the
 history ring log all live under it. **Put it on the SSD/USB disk, not the SD card.**
 Leave it blank and each part falls back to its historical spot under the plugin data
 dir.
-
-`historyToken` is optional and only matters if the boat already runs its own InfluxDB.
-Blank — the normal case — uses the built-in DB-less ring.
 
 Cache-manifest polling is always on (no toggle): tile freshness comes from the cloud
 announcing bakes, and without it a re-baked dataset would never refresh.
