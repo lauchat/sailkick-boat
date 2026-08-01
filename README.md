@@ -153,8 +153,30 @@ config it is now inert; the plugin logs `history -> live ring` regardless.
 A local InfluxDB is not a competitor here anyway. The app never requests finer than
 `every=5s` over a 24 h window, and the ring's floor at that window is 2 s — set
 `ringSampleSec: 5` and it matches anything the UI can draw, from live state. What an old
-database *is* good for is its contents ending up **in the cloud**, where the app can
-query them properly. See the roadmap note below.
+database *is* good for is its contents ending up **in the cloud** — see below.
+
+## Copying older history to the cloud (one-time)
+If the boat recorded into its own InfluxDB before it started syncing — a
+`signalk-to-influxdb-v2` bucket, or an imported logbook — the **backfill** copies it up
+so the cloud holds your full history. Live sync can't do this: it only ever sees deltas
+arriving now, and the spool only replays what it captured itself while offline.
+
+Fill the **Copy older history to the cloud** section and save. It walks backwards in
+one-hour windows (newest first, so recent history lands first), resumes after a restart
+from a manifest, and stands aside whenever live telemetry has a backlog — the data-
+critical path is never starved by a bulk upload. Progress shows in the status line.
+
+It needs a **cloud read+write token**, not the write token from signup. Every hour it
+uploads is verified by counting the destination, and a write-only token cannot read. A
+`204` means InfluxDB accepted the bytes, not that every point landed — without the count
+a partial write would be marked done and lost. The token is only needed while the
+backfill runs: **revoke it afterwards**, live sync is unaffected.
+
+Safe to re-run. Points are keyed by (measurement, tagset, nanosecond timestamp), so an
+identical point overwrites rather than duplicating — an interrupted migration is simply
+run again. Everything in the bucket is copied, including AIS contexts; hand-edit
+`backfill.selfOnly: true` to restrict it to your own vessel if cloud series cardinality
+becomes a problem.
 
 **True wind comes from your instruments.** If the boat publishes
 `environment.wind.speedTrue` / `directionTrue`, those are stored verbatim — a wind

@@ -6,6 +6,7 @@ const { createSync } = require('./lib/sync')
 const { createProxy } = require('./lib/proxy')
 const { createTelemetry } = require('./lib/telemetry')
 const { createHistory } = require('./lib/history')
+const { createBackfill } = require('./lib/backfill')
 const { resolveAccountConfig } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
@@ -44,6 +45,7 @@ const MANIFEST = { enabled: true, path: '/api/cache-manifest', pollIntervalSec: 
 const SEED_TUNING = { coastlineMaxZoom: 8, seabedMaxZoom: 6, concurrency: 4 }
 const PREFETCH_TUNING = { concurrency: 4 }
 const HISTORY_TUNING = { ringPersist: true, ringWindowSec: 86400, ringSampleSec: 15 }
+const BACKFILL_SRC_DEFAULTS = { influxUrl: 'http://127.0.0.1:8086', org: 'signalk', bucket: 'signalk' }
 
 // A *cloud* endpoint on a loopback or private address means telemetry never leaves the
 // LAN. On the wire that is indistinguishable from a normal offline backlog — the spool
@@ -61,6 +63,19 @@ function isPrivateHostUrl (u) {
   } catch { return false }
 }
 
+// The Signal K config UI writes every schema default on save, so a freshly pre-filled
+// `backfillOrg: "signalk"` can appear on a boat whose archive has always lived in org
+// "addiction" under the pre-0.15 `proxy.history` block — and the backfill would read an
+// empty bucket. Rule: an explicitly-changed field wins; else a legacy value that differs
+// from the default wins; else the default.
+function pickField (flat, legacy, dflt) {
+  const f = String(flat == null ? '' : flat).trim()
+  const l = String(legacy == null ? '' : legacy).trim()
+  if (f && f !== dflt) return { value: f, from: 'config' }
+  if (l && l !== dflt) return { value: l, from: 'legacy' }
+  return { value: f || l || dflt, from: 'default' }
+}
+
 // Endpoint resolution with one rule: the constant wins unless self-hosting is declared.
 // Returns { url, ignored } — `ignored` is the stale value we refused, so the caller can
 // say so out loud instead of leaving the owner to guess why nothing arrives.
@@ -76,6 +91,7 @@ module.exports = function (app) {
   let proxy = null
   let telemetry = null
   let history = null
+  let backfill = null
   let statusTimer = null
   let accountStatus = null
   let syncWarning = null
@@ -106,6 +122,19 @@ module.exports = function (app) {
         description: 'Send this vessel\'s data to your sailkick account. Buffered on disk, so an offline passage or a restart loses nothing. Requires pairing above.',
         properties: {
           enabled: { type: 'boolean', title: 'Enable telemetry sync', default: true }
+        }
+      },
+      backfill: {
+        type: 'object',
+        title: 'Copy older history to the cloud (one-time)',
+        description: 'If this boat recorded data into its own InfluxDB before it started syncing — a signalk-to-influxdb-v2 bucket, or an imported logbook — this copies it up so the app can chart it. It runs in the background, resumes after a restart, verifies every hour it uploads, and stands aside whenever live telemetry is behind. Safe to re-run: identical points overwrite rather than duplicate.',
+        properties: {
+          enabled: { type: 'boolean', title: 'Run the backfill', default: false },
+          cloudToken: { type: 'string', title: 'Cloud read+write token', description: 'A token with READ and WRITE on your cloud bucket. Your normal write token cannot read, and reading is how each uploaded hour is verified. Needed only while the backfill runs — revoke it afterwards; live sync is unaffected.' },
+          sourceToken: { type: 'string', title: 'Local InfluxDB read token' },
+          sourceUrl: { type: 'string', title: '…local InfluxDB URL', default: 'http://127.0.0.1:8086' },
+          sourceOrg: { type: 'string', title: '…organization', default: 'signalk' },
+          sourceBucket: { type: 'string', title: '…bucket', default: 'signalk' }
         }
       },
       proxy: {
@@ -284,6 +313,43 @@ module.exports = function (app) {
       }
     }
 
+    // --- backfill (best-effort, isolated: it must never disturb sync or the proxy) ---
+    const bf = opts.backfill || {}
+    const oldHist = (opts.proxy || {}).history || {}
+    if (bf.enabled === true) {
+      // Pre-0.15 installs kept the archive's coordinates in proxy.history.* — reuse them
+      // so nobody retypes an org/bucket the plugin already knows.
+      const src = {
+        url: pickField(bf.sourceUrl, oldHist.influxUrl, BACKFILL_SRC_DEFAULTS.influxUrl).value,
+        org: pickField(bf.sourceOrg, oldHist.org, BACKFILL_SRC_DEFAULTS.org).value,
+        bucket: pickField(bf.sourceBucket, oldHist.bucket, BACKFILL_SRC_DEFAULTS.bucket).value,
+        token: String(bf.sourceToken || oldHist.token || '').trim()
+      }
+      const dst = { url: influx.url, org: b.org || SYNC_TUNING.org, bucket: b.bucket, token: String(bf.cloudToken || '').trim() }
+      if (!b.writeToken) {
+        (app.error || console.error)('[sailkick-boat] backfill needs a paired account for its destination bucket — skipped')
+      } else if (!dst.token) {
+        (app.error || console.error)('[sailkick-boat] backfill needs a cloud READ+WRITE token: every uploaded hour is verified by counting the destination, which the write-only sync token cannot do — skipped')
+      } else if (!src.token) {
+        (app.error || console.error)('[sailkick-boat] backfill needs a read token for the local InfluxDB — skipped')
+      } else {
+        try {
+          backfill = createBackfill(app, {
+            src,
+            dst,
+            selfOnly: bf.selfOnly === true,
+            startBound: bf.startBound,
+            stateFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'backfill.json'),
+            pending: sync ? sync.pending : null
+          })
+          backfill.start()
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] backfill start failed: ' + e.message)
+          backfill = null
+        }
+      }
+    }
+
     statusTimer = setInterval(updateStatus, 5000)
     updateStatus()
   }
@@ -297,6 +363,7 @@ module.exports = function (app) {
     if (proxy) parts.push(proxy.status())
     if (telemetry) parts.push(telemetry.status())
     if (history) parts.push(history.status())
+    if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
   }
 
@@ -306,10 +373,12 @@ module.exports = function (app) {
     try { if (sync) sync.stop() } catch {}
     try { if (telemetry) telemetry.stop() } catch {}
     try { if (history) history.stop() } catch {}
+    try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
     sync = null
     telemetry = null
     history = null
+    backfill = null
     proxy = null
     accountStatus = null
     syncWarning = null
