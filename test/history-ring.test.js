@@ -185,3 +185,38 @@ test('history: ring log defaults under storeDir/history; ringDir overrides; ring
 
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+// --- true wind provenance (v0.14.6) ----------------------------------------------
+const { RingHistoryProvider: RP } = require('../lib/history/ring')
+const ringOf = (state) => {
+  const p = new RP({ source: { getState: () => state }, sampleSec: 1, windowSec: 600 })
+  p._sample()
+  return p.getSeries({ windowSec: 600 }).series
+}
+
+test('measured true wind from the instruments is used verbatim, not re-derived', () => {
+  // AWS/AWA/SOG here would derive ~9.2 kt; the wind system says 12.0 with its own
+  // heel/leeway correction. The instruments win — every other display aboard shows theirs.
+  const s = ringOf({ sogKt: 6, stwKt: 6, headingDeg: 0, awsKt: 17, awaDeg: 30, twsKt: 12, twdDeg: 200 })
+  assert.ok(Math.abs(s.tws[0][1] - 12) < 1e-9, 'TWS passed through untouched')
+  assert.ok(Math.abs(s.twd[0][1] - 200) < 1e-9, 'TWD passed through untouched')
+})
+
+test('derived true wind uses speed through water, not over ground', () => {
+  // Same boat, same wind, 3 kt of foul tide: STW 6, SOG 3. Deriving from SOG (the
+  // pre-0.14.6 behaviour) overstates the headwind component and skews TWS and TWD.
+  const base = { headingDeg: 0, awsKt: 15, awaDeg: 40 }
+  const withStw = ringOf({ ...base, stwKt: 6, sogKt: 3 })
+  const sogOnly = ringOf({ ...base, sogKt: 3 })
+  assert.ok(Math.abs(withStw.tws[0][1] - sogOnly.tws[0][1]) > 0.5,
+    'using STW gives a materially different answer than SOG in a tidal stream')
+  const noStw = ringOf({ ...base, sogKt: 3 })
+  assert.ok(Number.isFinite(noStw.tws[0][1]), 'boats with no paddlewheel still get a value')
+})
+
+test('STW is now a history channel, and absent when the boat has no log', () => {
+  const withLog = ringOf({ sogKt: 6, stwKt: 5.5, headingDeg: 10, awsKt: 12, awaDeg: 45 })
+  assert.ok(Math.abs(withLog.stw[0][1] - 5.5) < 1e-9)
+  const noLog = ringOf({ sogKt: 6, headingDeg: 10, awsKt: 12, awaDeg: 45 })
+  assert.strictEqual(noLog.stw, undefined, 'empty channels are omitted, not zero-filled')
+})

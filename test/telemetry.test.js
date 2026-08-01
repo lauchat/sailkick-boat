@@ -90,3 +90,34 @@ test('/ws/telemetry: 101 handshake + subprotocol, hello, then telemetry/update',
   if (srv.closeAllConnections) srv.closeAllConnections()
   srv.close()
 })
+
+// --- contract seam: our signalk-map must match the app's (v0.14.6) -----------------
+// signalk-map.js is a verbatim copy of the app's public/engine/signalk-map.js
+// (sailkick-archi 02-contracts.md calls it the highest-risk seam in the system). It had
+// drifted: nine cases the app gained with "STW/attitude/autopilot telemetry" were never
+// ported, so the boat silently dropped instrument true wind, STW, heel, rate of turn,
+// rudder and autopilot state — data that was sitting on the SignalK bus.
+const { signalkValuesToPatch } = require('../lib/telemetry/signalk-map')
+
+test('maps STW, measured true wind, attitude and autopilot (the drifted cases)', () => {
+  const p = signalkValuesToPatch([
+    { path: 'navigation.speedThroughWater', value: 3.0866 }, // 6 kt
+    { path: 'environment.wind.speedTrue', value: 6.1728 }, // 12 kt
+    { path: 'environment.wind.directionTrue', value: Math.PI }, // 180°
+    { path: 'steering.rudderAngle', value: Math.PI / 36 }, // 5°
+    { path: 'navigation.rateOfTurn', value: Math.PI / 180 }, // 60 °/min
+    { path: 'navigation.attitude', value: { roll: Math.PI / 18, pitch: 0, yaw: 0 } }, // 10° heel
+    { path: 'steering.autopilot.state', value: 'heading' },
+    { path: 'steering.autopilot.target.headingTrue', value: Math.PI / 2 }, // 90°
+    { path: 'steering.autopilot.target.windAngleApparent', value: -Math.PI / 4 } // -45°
+  ])
+  assert.ok(Math.abs(p.stwKt - 6) < 0.01)
+  assert.ok(Math.abs(p.twsKt - 12) < 0.01)
+  assert.ok(Math.abs(p.twdDeg - 180) < 0.01)
+  assert.ok(Math.abs(p.rudderDeg - 5) < 0.01)
+  assert.ok(Math.abs(p.rotDegMin - 60) < 0.01)
+  assert.ok(Math.abs(p.heelDeg - 10) < 0.01)
+  assert.strictEqual(p.apState, 'heading')
+  assert.ok(Math.abs(p.apTargetDeg - 90) < 0.01)
+  assert.ok(Math.abs(p.apTargetAwa + 45) < 0.01)
+})

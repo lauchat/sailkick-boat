@@ -146,6 +146,22 @@ Two ways, chosen automatically:
   same BoatState feeding `/ws/telemetry`) — for boats with no local InfluxDB, e.g.
   **SignalK on a Victron GX / Venus OS**. Same JSON contract, fully offline, no database.
   (`historyAvailable` reports true either way, so the app shows the Trends panel.)
+  Same eight channels as the InfluxDB path, `stw` included.
+
+**Do you actually need a local InfluxDB?** Usually not. The app never requests finer
+than `every=5s` over a `window` of 24 h, and the ring's floor at that window is 2 s — so
+set `ringSampleSec: 5` and it matches anything the UI can draw, from live state, with no
+database to run. A local InfluxDB is worth it only for history predating cloud sync,
+more than 30 days offline, or channels outside BoatState (engine, batteries) that the
+Trends panel does not chart anyway.
+
+**True wind comes from your instruments.** If the boat publishes
+`environment.wind.speedTrue` / `directionTrue`, those are stored verbatim — a wind
+system corrects for heel and leeway against water-referenced boat speed, and every other
+display aboard shows its numbers. Only when the boat publishes none is true wind
+derived, and then from **STW**, not SOG: true wind is relative to motion through the
+water. (Before v0.14.6 the derivation used SOG, which in 3 kt of foul tide skewed TWD by
+~12° and TWS by ~1.8 kt.) SOG is the last resort for boats with no paddlewheel.
   - **Persistent (append-log):** the ring is saved as a JSONL append-log at
     `<dataDir>/history/history-ring.jsonl` (on the SSD/USB with the tiles; override with
     `proxy.history.ringDir`), so it **survives restarts**. Each sample appends one line; the file is
