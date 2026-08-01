@@ -139,3 +139,72 @@ test('proxy: routes /api/history to local history when available, else mirrors',
 
   proxy.stop(); proxy2.stop(); influx.close(); upstream.close()
 })
+
+// --- archive fields exposed in the UI (v0.14.7) -----------------------------------
+// The local-InfluxDB archive is now configurable from the config page (URL, org,
+// bucket) with defaults pre-filled. The hazard that needs a test: the Signal K UI
+// writes every schema default on save, so a boat whose archive lives in org
+// "addiction" / bucket "bandg" under the old nested proxy.history block would have
+// those shadowed by a freshly-written `historyOrg: "signalk"` — and the archive would
+// go quiet with nothing to explain it.
+const fsA = require('node:fs')
+const osA = require('node:os')
+const pathA = require('node:path')
+
+function historyOptsFor (config) {
+  for (const k of Object.keys(require.cache)) delete require.cache[k]
+  let seen = null
+  for (const [mod, key, stub] of [
+    ['../lib/history', 'createHistory', () => ({ start () {}, stop () {}, status: () => '', available: () => false })],
+    ['../lib/sync', 'createSync', () => ({ start () {}, stop () {}, status: () => '' })]
+  ]) {
+    const rp = require.resolve(pathA.join(__dirname, mod))
+    require.cache[rp] = { id: rp, filename: rp, loaded: true, exports: { [key]: (app, o) => { if (key === 'createHistory') seen = o; return stub() } } }
+  }
+  const dir = fsA.mkdtempSync(pathA.join(osA.tmpdir(), 'sk-hist-'))
+  const app = {
+    debug () {}, error () {}, getDataDirPath: () => dir, setPluginStatus () {},
+    selfId: 'u', subscriptionmanager: { subscribe () {} }, getSelfPath: () => null
+  }
+  const pl = require('../index.js')(app)
+  pl.start(config)
+  pl.stop()
+  return seen
+}
+
+const ACC = { slug: 'addiction', writeToken: 'W' }
+
+test('a legacy archive survives the UI writing the new defaults over it', () => {
+  const o = historyOptsFor({
+    account: ACC,
+    proxy: {
+      enabled: true,
+      proxyPort: 0,
+      historyToken: 'RTOK',
+      historyInfluxUrl: 'http://127.0.0.1:8086', // same as default
+      historyOrg: 'signalk', // default, written by the UI on save
+      historyBucket: 'signalk', // default, written by the UI on save
+      history: { org: 'addiction', bucket: 'bandg', token: 'RTOK' } // the real archive
+    }
+  })
+  assert.strictEqual(o.org, 'addiction', 'the archive org is not lost to a written default')
+  assert.strictEqual(o.bucket, 'bandg')
+  assert.strictEqual(o.token, 'RTOK')
+})
+
+test('an explicitly changed field beats the legacy value', () => {
+  const o = historyOptsFor({
+    account: ACC,
+    proxy: { enabled: true, proxyPort: 0, historyToken: 'RTOK', historyOrg: 'newco', historyBucket: 'newbucket', history: { org: 'addiction', bucket: 'bandg' } }
+  })
+  assert.strictEqual(o.org, 'newco', 'the owner can move the archive')
+  assert.strictEqual(o.bucket, 'newbucket')
+})
+
+test('no token means the ring, with archive fields at their defaults', () => {
+  const o = historyOptsFor({ account: ACC, proxy: { enabled: true, proxyPort: 0 } })
+  assert.strictEqual(o.token, '', 'the token is the switch')
+  assert.strictEqual(o.influxUrl, 'http://127.0.0.1:8086')
+  assert.strictEqual(o.org, 'signalk')
+  assert.strictEqual(o.bucket, 'signalk')
+})

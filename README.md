@@ -148,7 +148,23 @@ Two ways, chosen automatically:
   (`historyAvailable` reports true either way, so the app shows the Trends panel.)
   Same eight channels as the InfluxDB path, `stw` included.
 
-**Do you actually need a local InfluxDB?** Usually not. The app never requests finer
+**Serving an archive.** Set `historyToken` and the three `history*` fields point at any
+InfluxDB holding `signalk-to-influxdb-v2`-schema data — a still-running local database,
+or a bucket you imported an old logbook into. That is the archive's real value: history
+from before this boat ever synced to the cloud. The token is the switch; blank means the
+built-in ring. The plugin logs which source it chose at startup:
+
+```
+[sailkick-boat] history -> archive http://127.0.0.1:8086 org=addiction bucket=bandg
+[sailkick-boat] history -> built-in ring (no archive token set)
+```
+
+Upgrading from before 0.14.7, when these lived in a hidden `proxy.history` block: your
+saved values still win over the newly pre-filled defaults, so an archive in a
+non-default org/bucket is not silently lost when the config UI writes `signalk` over it.
+The plugin says so in the log — copy the values into the visible fields when convenient.
+
+**Do you actually need a local InfluxDB?** For *live* trends, usually not. The app never requests finer
 than `every=5s` over a `window` of 24 h, and the ring's floor at that window is 2 s — so
 set `ringSampleSec: 5` and it matches anything the UI can draw, from live state, with no
 database to run. A local InfluxDB is worth it only for history predating cloud sync,
@@ -223,7 +239,10 @@ in `index.js`.
 - **Telemetry sync → cloud**: `enabled`
 - **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
   (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
-  `prefetchDetailZoom`, `historyToken`
+  `prefetchDetailZoom`
+- **History archive** (optional): `historyToken`, `historyInfluxUrl`
+  (default `http://127.0.0.1:8086`), `historyOrg` + `historyBucket` (default `signalk`,
+  matching `signalk-to-influxdb-v2`)
 
 `dataDir` is the one storage location — cached maps, the telemetry spool and the
 history ring log all live under it. **Put it on the SSD/USB disk, not the SD card.**

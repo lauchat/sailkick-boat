@@ -69,6 +69,20 @@ function isPrivateHostUrl (u) {
   } catch { return false }
 }
 
+// A pre-filled schema default must not silently shadow a legacy value that differs. The
+// Signal K config UI writes every default on save, so `historyOrg: "signalk"` appears on
+// a boat whose archive has always lived in org "addiction" under the old nested
+// proxy.history block — and the archive would go quiet with no explanation. Rule: an
+// explicitly-changed field wins; otherwise a legacy value that differs from the default
+// wins; otherwise the default.
+function pickHistoryField (flat, legacy, dflt) {
+  const f = String(flat == null ? '' : flat).trim()
+  const l = String(legacy == null ? '' : legacy).trim()
+  if (f && f !== dflt) return { value: f, from: 'config' }
+  if (l && l !== dflt) return { value: l, from: 'legacy' }
+  return { value: f || l || dflt, from: 'default' }
+}
+
 // Endpoint resolution with one rule: the constant wins unless self-hosting is declared.
 // Returns { url, ignored } — `ignored` is the stale value we refused, so the caller can
 // say so out loud instead of leaving the owner to guess why nothing arrives.
@@ -141,7 +155,10 @@ module.exports = function (app) {
             enumNames: ['Overview (z12)', 'Coastal (z13)', 'Detailed (z14)', 'Harbor (z15)'],
             default: 13
           },
-          historyToken: { type: 'string', title: 'Local InfluxDB read token (optional)', description: 'Only if this boat already runs its own InfluxDB (e.g. signalk-to-influxdb-v2) and you want full history from it. Leave blank — the plugin then keeps its own lightweight history, which is what most boats want.' }
+          historyToken: { type: 'string', title: 'History archive: read token', description: 'Leave blank for the built-in lightweight history, which is what most boats want and needs no database. Paste a read token to serve Trends and the track from a local InfluxDB instead — worth it for history recorded before this boat synced to the cloud, for more than 30 days offline, or for an imported archive. Setting a token switches the source; the three fields below say where to find it.' },
+          historyInfluxUrl: { type: 'string', title: '…InfluxDB URL', description: 'Where the archive lives. The default is an InfluxDB on this machine.', default: 'http://127.0.0.1:8086' },
+          historyOrg: { type: 'string', title: '…organization', description: 'Default matches signalk-to-influxdb-v2.', default: 'signalk' },
+          historyBucket: { type: 'string', title: '…bucket', description: 'Default matches signalk-to-influxdb-v2. An imported archive often uses its own name.', default: 'signalk' }
         }
       }
     }
@@ -220,6 +237,22 @@ module.exports = function (app) {
       const oldSeed = p.seed || {}
       const oldPrefetch = p.prefetch || {}
       const oldHistory = p.history || {}
+      // History source, resolved before the modules start so it can be reported. A token
+      // is the switch: present = query the archive, absent = the built-in ring.
+      const hUrl = pickHistoryField(p.historyInfluxUrl, oldHistory.influxUrl, HISTORY_TUNING.influxUrl)
+      const hOrg = pickHistoryField(p.historyOrg, oldHistory.org, HISTORY_TUNING.org)
+      const hBucket = pickHistoryField(p.historyBucket, oldHistory.bucket, HISTORY_TUNING.bucket)
+      const hToken = String(p.historyToken || oldHistory.token || '').trim()
+      const fromLegacy = [['URL', hUrl], ['org', hOrg], ['bucket', hBucket]].filter(([, v]) => v.from === 'legacy')
+      if (hToken) {
+        console.log(`[sailkick-boat] history -> archive ${hUrl.value} org=${hOrg.value} bucket=${hBucket.value}`)
+        if (fromLegacy.length) {
+          ;(app.error || console.error)(`[sailkick-boat] history archive ${fromLegacy.map(([n]) => n).join(' + ')} taken from the old proxy.history config, not the new field(s) — copy the value(s) up to keep them after the next save`)
+        }
+      } else {
+        console.log('[sailkick-boat] history -> built-in ring (no archive token set)')
+      }
+
       if (upstream.ignored) {
         ;(app.error || console.error)(`[sailkick-boat] ignoring proxy.sailkickUrl "${upstream.ignored}" left over from an older config — mirroring ${upstream.url}. Set proxy.selfHosted:true to keep your own server.`)
       }
@@ -251,10 +284,10 @@ module.exports = function (app) {
         history: {
           ...HISTORY_TUNING,
           enabled: oldHistory.enabled !== false,
-          influxUrl: oldHistory.influxUrl || HISTORY_TUNING.influxUrl,
-          org: oldHistory.org || HISTORY_TUNING.org,
-          bucket: oldHistory.bucket || HISTORY_TUNING.bucket,
-          token: p.historyToken || oldHistory.token || '',
+          influxUrl: hUrl.value,
+          org: hOrg.value,
+          bucket: hBucket.value,
+          token: hToken,
           ringPersist: oldHistory.ringPersist !== false,
           ringWindowSec: oldHistory.ringWindowSec || HISTORY_TUNING.ringWindowSec,
           ringSampleSec: oldHistory.ringSampleSec || HISTORY_TUNING.ringSampleSec,
