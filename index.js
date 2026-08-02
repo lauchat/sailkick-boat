@@ -7,6 +7,7 @@ const { createProxy } = require('./lib/proxy')
 const { createTelemetry } = require('./lib/telemetry')
 const { createHistory } = require('./lib/history')
 const { createBackfill } = require('./lib/backfill')
+const { createAis } = require('./lib/ais')
 const { resolveAccountConfig } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
@@ -92,6 +93,7 @@ module.exports = function (app) {
   let telemetry = null
   let history = null
   let backfill = null
+  let ais = null
   let statusTimer = null
   let accountStatus = null
   let syncWarning = null
@@ -122,6 +124,15 @@ module.exports = function (app) {
         description: 'Send this vessel\'s data to your sailkick account. Buffered on disk, so an offline passage or a restart loses nothing. Requires pairing above.',
         properties: {
           enabled: { type: 'boolean', title: 'Enable telemetry sync', default: true }
+        }
+      },
+      ais: {
+        type: 'object',
+        title: 'Upload AIS targets',
+        description: 'Send the AIS this boat\'s own receiver hears to the cloud, so the web app can show other vessels, their heading and their trail. Only locally received AIS is forwarded — an internet feed such as signalk-aisstream is skipped, since the cloud can fetch that itself without spending your uplink. REQUIRES a cloud that filters history on self; until then leave this off or the owner\'s SOG and heading charts will pick up other ships.',
+        properties: {
+          enabled: { type: 'boolean', title: 'Upload AIS targets', default: false },
+          source: { type: 'string', title: 'Only this AIS source', description: 'Blank forwards every source except known internet feeds. The plugin logs the AIS sources it sees — copy the one for your own receiver here if you want to be explicit.' }
         }
       },
       backfill: {
@@ -313,6 +324,31 @@ module.exports = function (app) {
       }
     }
 
+    // --- AIS upload (isolated; yields to telemetry, its own spool) ---
+    const aisOpts = opts.ais || {}
+    if (aisOpts.enabled === true) {
+      if (!b.writeToken) {
+        (app.error || console.error)('[sailkick-boat] AIS upload needs a paired account for its destination bucket — skipped')
+      } else {
+        try {
+          ais = createAis(app, {
+            influxUrl: influx.url,
+            org: b.org || SYNC_TUNING.org,
+            bucket: b.bucket,
+            token: b.writeToken,
+            source: String(aisOpts.source || '').trim() || null,
+            spoolDir: store ? path.join(store, 'ais-spool') : undefined,
+            pending: sync ? sync.pending : null
+          })
+          ais.start()
+          console.log(`[sailkick-boat] ais -> ${influx.url} bucket=${b.bucket}${aisOpts.source ? ' source=' + aisOpts.source : ''}`)
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] AIS start failed: ' + e.message)
+          ais = null
+        }
+      }
+    }
+
     // --- backfill (best-effort, isolated: it must never disturb sync or the proxy) ---
     const bf = opts.backfill || {}
     const oldHist = (opts.proxy || {}).history || {}
@@ -363,6 +399,7 @@ module.exports = function (app) {
     if (proxy) parts.push(proxy.status())
     if (telemetry) parts.push(telemetry.status())
     if (history) parts.push(history.status())
+    if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
   }
@@ -373,12 +410,14 @@ module.exports = function (app) {
     try { if (sync) sync.stop() } catch {}
     try { if (telemetry) telemetry.stop() } catch {}
     try { if (history) history.stop() } catch {}
+    try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
     sync = null
     telemetry = null
     history = null
     backfill = null
+    ais = null
     proxy = null
     accountStatus = null
     syncWarning = null

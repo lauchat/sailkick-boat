@@ -155,6 +155,33 @@ A local InfluxDB is not a competitor here anyway. The app never requests finer t
 `ringSampleSec: 5` and it matches anything the UI can draw, from live state. What an old
 database *is* good for is its contents ending up **in the cloud** — see below.
 
+## Uploading AIS targets
+The cloud app already draws other vessels, but its AIS source polls a SignalK server over
+the LAN and keeps everything in memory — which cannot work once a boat is on a mobile
+link. Enable **Upload AIS targets** and the boat pushes what its own receiver hears, so
+the web app can show other boats, their heading and their trail from stored data.
+
+Only **locally received** AIS is forwarded. A boat running an internet feed such as
+`signalk-aisstream` would otherwise spend uplink bandwidth sending data the cloud can
+fetch directly from the same API — known feeds are skipped automatically. The plugin logs
+the AIS sources it sees, so you can name your own receiver in **Only this AIS source** if
+you want to be explicit.
+
+There is no radius or rate limit: a real AIS receiver is bounded by VHF line-of-sight,
+which is the honest limiter, and offshore — where this data is most valuable, because
+commercial feeds are blind there — it tends to zero. Vessel identity (name, dimensions,
+ship type) repeats every few minutes and never changes, so it is re-sent at most hourly;
+positions are never throttled.
+
+Telemetry always wins the link. AIS buffers in its **own** spool with its own cap and
+stands down completely whenever the telemetry spool has a backlog, so a busy anchorage
+can never delay or evict your own boat's data.
+
+> ⚠️ **Requires a cloud that filters history on `self`.** Every AIS row is tagged
+> `self=false`, and the cloud's Trends and track queries must filter `self == "true"`.
+> Without that, other ships' speed and heading appear in *your* charts. Leave this off
+> until the server side is in place.
+
 ## Copying older history to the cloud (one-time)
 If the boat recorded into its own InfluxDB before it started syncing — a
 `signalk-to-influxdb-v2` bucket, or an imported logbook — the **backfill** copies it up
@@ -244,6 +271,7 @@ in `index.js`.
 
 - **Sailkick account**: `slug` (boat name), `writeToken`
 - **Telemetry sync → cloud**: `enabled`
+- **Upload AIS targets**: `enabled` (default off), `source`
 - **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
   (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
   `prefetchDetailZoom`
