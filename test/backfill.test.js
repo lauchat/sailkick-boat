@@ -423,3 +423,87 @@ test('an empty source bucket is reported before walking thousands of windows', a
   assert.match(bf.status(), /empty|check the names/i)
   assert.strictEqual(capture.writes.length, 0)
 })
+
+// --- scale + overlap (v0.17.2) ------------------------------------------------------
+// A real archive was measured at 54M points/day — ~2.25M per hour, ~400 MB of CSV. A
+// window is read whole and converted in memory, so without subdivision that exhausts a
+// Raspberry Pi long before bandwidth matters.
+
+function denseFake ({ perWindow, dstOldest, capture }) {
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const flux = Buffer.concat(chunks).toString()
+      if (req.url.startsWith('/api/v2/write')) { res.statusCode = 204; res.end(); return }
+      res.setHeader('Content-Type', 'application/csv')
+      if (flux.includes('schema.tagValues')) {
+        res.end('#datatype,string,long,string\r\n,result,table,_value\r\n,_result,0,vessels.mine\r\n')
+      } else if (flux.includes('min(column:"_time")')) {
+        // the destination probe answers with the cloud's oldest point; the source with its own
+        const isDst = flux.includes('_raw')
+        const v = isDst ? dstOldest : new Date(Date.now() - 4 * 3600000).toISOString()
+        if (isDst && !dstOldest) { res.end('#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n'); return }
+        res.end(`#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n,_result,0,${v}\r\n`)
+      } else if (flux.includes('count()')) {
+        const m = flux.match(/range\(start:([^,]+),stop:([^)]+)\)/)
+        const span = m ? Date.parse(m[2]) - Date.parse(m[1]) : 3600000
+        if (flux.includes('_raw')) { res.end('#datatype,string,long,long\r\n,result,table,_value\r\n,_result,0,999999\r\n'); return }
+        capture.spans.push(span)
+        // density is per-hour, so a smaller span holds proportionally fewer points
+        const n = Math.round(perWindow * (span / 3600000))
+        res.end(`#datatype,string,long,long\r\n,result,table,_value\r\n,_result,0,${n}\r\n`)
+      } else {
+        res.end(CSV('string,long,dateTime:RFC3339,double,string,string,string,string',
+          'result,table,_time,_value,_field,_measurement,context,self',
+          `_result,0,${new Date().toISOString()},5,value,navigation.speedOverGround,vessels.mine,true`))
+      }
+    })
+  })
+  return srv
+}
+
+test('a window too dense to hold in memory is subdivided', async () => {
+  const capture = { spans: [] }
+  const srv = denseFake({ perWindow: 2250000, dstOldest: null, capture }) // 2.25M/hour, as measured
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'addiction', bucket: 'bandg', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine',
+    stateFile: tmpFile(),
+    maxRowsPerChunk: 100000,
+    idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  const smallest = Math.min(...capture.spans)
+  assert.ok(smallest < 3600000, 'the hour was split')
+  assert.ok(smallest >= 60000, 'but never below the one-minute floor')
+  // 2.25M/hour against a 100k cap needs roughly a 32x split, i.e. ~112s slices
+  assert.ok(smallest <= 300000, `slices should be minutes, not hours (got ${smallest}ms)`)
+})
+
+test('the walk starts below what live sync already covers, not at now', async () => {
+  const capture = { spans: [] }
+  const cloudStart = new Date(Date.now() - 2 * 3600000) // live sync began 2h ago
+  const srv = denseFake({ perWindow: 10, dstOldest: cloudStart.toISOString(), capture })
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'addiction', bucket: 'bandg', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine',
+    stateFile: tmpFile(),
+    idleMs: 0
+  })
+  bf.start(); await bf._wait()
+  const st = bf._state()
+  shut(srv)
+  assert.ok(st.ceiling <= cloudStart.getTime(), 'ceiling is at or below where the cloud starts')
+  assert.ok(st.ceiling > cloudStart.getTime() - 3600000 - 1, 'and not needlessly earlier')
+  // every window walked must be older than the ceiling — no re-upload of live-covered data
+  assert.ok(Object.keys(st.done).every((k) => Date.parse(k) <= st.ceiling),
+    'no window newer than the ceiling was touched')
+})

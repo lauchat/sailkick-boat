@@ -214,6 +214,18 @@ MMSI URN) still migrate. Hand-edit `backfill.context` to force a specific one.
 A run that copies **zero** points is reported as a problem, not as success: that almost
 always means the org or bucket is wrong rather than that the archive is empty.
 
+**It starts below what live sync already covers.** The destination's own oldest point is
+the moment cloud sync began, so the walk begins there rather than at *now*. Without that,
+a source archive that is still being written — a `signalk-to-influxdb-v2` bucket still
+recording — makes the first windows re-upload today's data. The timestamps are correct,
+but it is data the cloud already has, and a lot of wasted uplink.
+
+**Dense archives are subdivided.** A window is read whole and converted in memory, and a
+busy boat can produce millions of points an hour (54M/day was measured on a real boat —
+about 400 MB of CSV per hour). When a window holds more than `maxRowsPerChunk` points it
+is halved until it fits, down to a one-minute floor. The count is already known before
+the read, so this costs nothing extra.
+
 **True wind comes from your instruments.** If the boat publishes
 `environment.wind.speedTrue` / `directionTrue`, those are stored verbatim — a wind
 system corrects for heel and leeway against water-referenced boat speed, and every other
