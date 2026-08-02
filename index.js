@@ -373,7 +373,10 @@ module.exports = function (app) {
           backfill = createBackfill(app, {
             src,
             dst,
-            selfOnly: bf.selfOnly === true,
+            // Never a config option: the plugin must not upload data that is not this
+            // boat's, and the cloud's history queries depend on that holding.
+            selfContext: app.selfContext || ('vessels.' + (app.selfId || 'self')),
+            context: String(bf.context || '').trim() || null, // hand-edit escape hatch
             startBound: bf.startBound,
             stateFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'backfill.json'),
             pending: sync ? sync.pending : null

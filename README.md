@@ -201,9 +201,18 @@ backfill runs: **revoke it afterwards**, live sync is unaffected.
 
 Safe to re-run. Points are keyed by (measurement, tagset, nanosecond timestamp), so an
 identical point overwrites rather than duplicating — an interrupted migration is simply
-run again. Everything in the bucket is copied, including AIS contexts; hand-edit
-`backfill.selfOnly: true` to restrict it to your own vessel if cloud series cardinality
-becomes a problem.
+run again.
+
+**Only this boat's data is copied**, and that is not configurable. The cloud's history
+queries assume your bucket holds one vessel, so uploading an archive's AIS would put
+other ships into your own SOG and heading charts. If the source holds several contexts
+the plugin copies yours and logs which it skipped. If it holds exactly **one** context it
+is copied whatever identity string it uses — a bucket with one vessel cannot be an AIS
+collection, and this is what lets an archive recorded under an older Signal K UUID (or an
+MMSI URN) still migrate. Hand-edit `backfill.context` to force a specific one.
+
+A run that copies **zero** points is reported as a problem, not as success: that almost
+always means the org or bucket is wrong rather than that the archive is empty.
 
 **True wind comes from your instruments.** If the boat publishes
 `environment.wind.speedTrue` / `directionTrue`, those are stored verbatim — a wind

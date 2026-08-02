@@ -124,7 +124,9 @@ function fakeInflux ({ srcPointsPerWindow = 2, dstShortfall = 0, writeStatus = 2
       const flux = raw.toString()
       if (srcFails && flux.includes('signalk')) { res.statusCode = 500; res.end('boom'); return }
       res.setHeader('Content-Type', 'application/csv')
-      if (flux.includes('min(column:"_time")')) {
+      if (flux.includes('schema.tagValues')) {
+        res.end('#datatype,string,long,string\r\n,result,table,_value\r\n,_result,0,vessels.self-boat\r\n')
+      } else if (flux.includes('min(column:"_time")')) {
         res.end(`#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n,_result,0,${earliest}\r\n`)
       } else if (flux.includes('count()')) {
         // destination counts are the source count minus any configured shortfall
@@ -270,7 +272,9 @@ test('walk: the window CONTAINING the oldest point is copied, not skipped', asyn
       const flux = Buffer.concat(chunks).toString()
       if (req.url.startsWith('/api/v2/write')) { res.statusCode = 204; res.end(); return }
       res.setHeader('Content-Type', 'application/csv')
-      if (flux.includes('min(column:"_time")')) {
+      if (flux.includes('schema.tagValues')) {
+        res.end('#datatype,string,long,string\r\n,result,table,_value\r\n,_result,0,vessels.self-boat\r\n')
+      } else if (flux.includes('min(column:"_time")')) {
         res.end(`#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n,_result,0,${oldest}\r\n`)
       } else if (flux.includes('count()')) {
         const m = flux.match(/range\(start:([^,]+),/)
@@ -296,4 +300,126 @@ test('conversion: a cell that merely looks numeric is not treated as a date', ()
   const { recordToLine } = require('../lib/backfill/lineproto')
   const line = recordToLine({ _measurement: 'm', _value: '1', _time: '2026-07-19T10:00:00Z', table: '0', result: '_result' }, 'double')
   assert.ok(!/table=/.test(line) && !/result=/.test(line), 'structural columns never become tags')
+})
+
+// --- the plugin must never upload another vessel's data (v0.17.1) ------------------
+// Live sync guarantees <slug>_raw holds one boat by subscribing to vessels.self, and
+// the cloud's history queries depend on that. The backfill is the only thing that could
+// break it, so the rule is in code rather than in a config option someone can get wrong.
+
+function contextFake ({ contexts, rows, capture }) {
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const flux = Buffer.concat(chunks).toString()
+      if (req.url.startsWith('/api/v2/write')) {
+        capture.writes.push(zlib.gunzipSync(Buffer.concat(chunks)).toString())
+        res.statusCode = 204; res.end(); return
+      }
+      if (flux.includes('|>filter(')) capture.filters.push(flux.match(/\|>filter\([^|]*\)/)[0])
+      res.setHeader('Content-Type', 'application/csv')
+      if (flux.includes('schema.tagValues')) {
+        res.end('#datatype,string,long,string\r\n,result,table,_value\r\n' +
+          contexts.map((c) => `,_result,0,${c}\r\n`).join(''))
+      } else if (flux.includes('min(column:"_time")')) {
+        res.end(`#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n,_result,0,${new Date(Date.now() - 2 * 3600000).toISOString()}\r\n`)
+      } else if (flux.includes('count()')) {
+        res.end(`#datatype,string,long,long\r\n,result,table,_value\r\n,_result,0,${rows.length}\r\n`)
+      } else {
+        res.end(CSV('string,long,dateTime:RFC3339,double,string,string,string,string',
+          'result,table,_time,_value,_field,_measurement,context,self', ...rows))
+      }
+    })
+  })
+  return srv
+}
+
+test('a multi-context archive is filtered to this boat', async () => {
+  const capture = { writes: [], filters: [] }
+  const now = new Date().toISOString()
+  const srv = contextFake({
+    contexts: ['vessels.mine', 'vessels.urn:mrn:imo:mmsi:111', 'atons.urn:mrn:imo:mmsi:222'],
+    rows: [`_result,0,${now},5,value,navigation.speedOverGround,vessels.mine,true`],
+    capture
+  })
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'addiction', bucket: 'bandg', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine',
+    stateFile: tmpFile(),
+    idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  const fetches = capture.filters.filter((f) => /self==|context==/.test(f))
+  assert.ok(fetches.length > 0, 'a context filter was applied')
+  assert.ok(fetches.every((f) => f.includes('vessels.mine')), 'scoped to this boat')
+  assert.ok(!fetches.some((f) => f.includes('atons')), 'AtoNs and other vessels are not selected')
+})
+
+test('a single-context archive is copied whatever identity string it uses', async () => {
+  // An import may carry a UUID from a since-reinstalled Signal K, or an MMSI URN. One
+  // context means one vessel, so it cannot be an AIS collection — copy it.
+  const capture = { writes: [], filters: [] }
+  const now = new Date().toISOString()
+  const srv = contextFake({
+    contexts: ['vessels.urn:mrn:signalk:uuid:OLD-INSTALL'],
+    rows: [`_result,0,${now},5,value,navigation.speedOverGround,vessels.urn:mrn:signalk:uuid:OLD-INSTALL,`],
+    capture
+  })
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'addiction', bucket: 'bandg', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.urn:mrn:imo:mmsi:269118770', // today's identity — different!
+    stateFile: tmpFile(),
+    idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  assert.ok(!capture.filters.some((f) => /context==/.test(f)), 'no filter — nothing to exclude')
+  assert.ok(capture.writes.length > 0, 'the archive is still copied despite the identity mismatch')
+})
+
+test('a walk that copies nothing is NOT reported complete', async () => {
+  // Wrong org/bucket, or a filter matching no rows, must not masquerade as success.
+  const capture = { writes: [], filters: [] }
+  const srv = contextFake({ contexts: ['vessels.mine'], rows: [], capture }) // count says 0
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const stateFile = tmpFile()
+  const bf = createBackfill(app, {
+    src: { url, org: 'sailkick', bucket: 'signalk', token: 'R' }, // the tempting defaults
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine',
+    stateFile,
+    idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  assert.doesNotMatch(bf.status(), /complete/, 'must not claim success')
+  assert.match(bf.status(), /0 points|check/i)
+  const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+  assert.strictEqual(st.complete, false, 'left incomplete so it retries')
+})
+
+test('an empty source bucket is reported before walking thousands of windows', async () => {
+  const capture = { writes: [], filters: [] }
+  const srv = contextFake({ contexts: [], rows: [], capture }) // no contexts at all
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'sailkick', bucket: 'signalk', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine',
+    stateFile: tmpFile(),
+    idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+  assert.match(bf.status(), /empty|check the names/i)
+  assert.strictEqual(capture.writes.length, 0)
 })
