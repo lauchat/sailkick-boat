@@ -155,6 +155,22 @@ A local InfluxDB is not a competitor here anyway. The app never requests finer t
 `ringSampleSec: 5` and it matches anything the UI can draw, from live state. What an old
 database *is* good for is its contents ending up **in the cloud** — see below.
 
+## AIS on the boat's own chart
+The app draws other vessels from `GET /api/ais`. The cloud serves that by polling a
+SignalK server over the LAN and gates it behind a boat session — neither of which can
+work from a boat on a mobile link, and the mirror forwards no cookies, so proxying it
+returns 401 whatever you do.
+
+The plugin therefore serves `/api/ais` **from the boat's own SignalK**, in the same
+envelope the app already consumes: position, SOG, COG, heading, rate of turn, name,
+dimensions and ship type, plus a ~1 h trail per vessel. Anchored ships stay a single dot
+— a trail point is added only once a vessel has moved more than 30 m — and a target
+unheard for 15 min is dropped. A failed poll keeps the last snapshot rather than blanking
+the chart.
+
+This works **with no uplink at all**, which is when other vessels on your chart matter
+most. Turn it off by hand-editing `proxy.serveAis: false`.
+
 ## Uploading AIS targets
 The cloud app already draws other vessels, but its AIS source polls a SignalK server over
 the LAN and keeps everything in memory — which cannot work once a boat is on a mobile

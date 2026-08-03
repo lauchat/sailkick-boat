@@ -8,6 +8,7 @@ const { createTelemetry } = require('./lib/telemetry')
 const { createHistory } = require('./lib/history')
 const { createBackfill } = require('./lib/backfill')
 const { createAis } = require('./lib/ais')
+const { createAisTargets } = require('./lib/ais/targets')
 const { resolveAccountConfig } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
@@ -94,6 +95,7 @@ module.exports = function (app) {
   let history = null
   let backfill = null
   let ais = null
+  let aisTargets = null
   let statusTimer = null
   let accountStatus = null
   let syncWarning = null
@@ -291,6 +293,19 @@ module.exports = function (app) {
         }
       }
 
+      // AIS targets for the boat's own browser, from local SignalK. Independent of the
+      // AIS upload above: this one works with no uplink, which is when it matters most.
+      if (p.serveAis !== false) {
+        try {
+          aisTargets = createAisTargets(app, { localSignalkUrl: pOpts.localSignalkUrl })
+          aisTargets.start()
+          pOpts.aisTargets = aisTargets
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] AIS targets start failed: ' + e.message)
+          aisTargets = null
+        }
+      }
+
       if (p.serveTelemetry !== false) {
         try {
           telemetry = createTelemetry(app, {})
@@ -402,6 +417,7 @@ module.exports = function (app) {
     if (proxy) parts.push(proxy.status())
     if (telemetry) parts.push(telemetry.status())
     if (history) parts.push(history.status())
+    if (aisTargets) parts.push(aisTargets.status())
     if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
@@ -413,6 +429,7 @@ module.exports = function (app) {
     try { if (sync) sync.stop() } catch {}
     try { if (telemetry) telemetry.stop() } catch {}
     try { if (history) history.stop() } catch {}
+    try { if (aisTargets) aisTargets.stop() } catch {}
     try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
@@ -421,6 +438,7 @@ module.exports = function (app) {
     history = null
     backfill = null
     ais = null
+    aisTargets = null
     proxy = null
     accountStatus = null
     syncWarning = null
