@@ -236,6 +236,13 @@ a source archive that is still being written — a `signalk-to-influxdb-v2` buck
 recording — makes the first windows re-upload today's data. The timestamps are correct,
 but it is data the cloud already has, and a lot of wasted uplink.
 
+**Field types come from the source, not from guessing.** Queries ask InfluxDB for the
+`#datatype` annotation explicitly. Without it the response is unannotated and types have
+to be inferred from the text — which fails hard on a string field whose values sometimes
+look numeric (`"8"` emitted bare as a float, `"1.2.3.4"` quoted as a string), producing
+`422 field type conflict` and aborting the run. Integers also keep their type instead of
+silently becoming floats.
+
 **Dense archives are subdivided.** A window is read whole and converted in memory, and a
 busy boat can produce millions of points an hour (54M/day was measured on a real boat —
 about 400 MB of CSV per hour). When a window holds more than `maxRowsPerChunk` points it

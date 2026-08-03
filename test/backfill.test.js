@@ -121,7 +121,8 @@ function fakeInflux ({ srcPointsPerWindow = 2, dstShortfall = 0, writeStatus = 2
         return
       }
       seen.queries++
-      const flux = raw.toString()
+      let flux = raw.toString()
+      try { flux = JSON.parse(flux).query || flux } catch {} // queries are a JSON envelope now
       if (srcFails && flux.includes('signalk')) { res.statusCode = 500; res.end('boom'); return }
       res.setHeader('Content-Type', 'application/csv')
       if (flux.includes('schema.tagValues')) {
@@ -269,7 +270,8 @@ test('walk: the window CONTAINING the oldest point is copied, not skipped', asyn
     const chunks = []
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
-      const flux = Buffer.concat(chunks).toString()
+      let flux = Buffer.concat(chunks).toString()
+      try { flux = JSON.parse(flux).query || flux } catch {} // queries are a JSON envelope now
       if (req.url.startsWith('/api/v2/write')) { res.statusCode = 204; res.end(); return }
       res.setHeader('Content-Type', 'application/csv')
       if (flux.includes('schema.tagValues')) {
@@ -312,7 +314,8 @@ function contextFake ({ contexts, rows, capture }) {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
-      const flux = Buffer.concat(chunks).toString()
+      let flux = Buffer.concat(chunks).toString()
+      try { flux = JSON.parse(flux).query || flux } catch {} // queries are a JSON envelope now
       if (req.url.startsWith('/api/v2/write')) {
         capture.writes.push(zlib.gunzipSync(Buffer.concat(chunks)).toString())
         res.statusCode = 204; res.end(); return
@@ -434,7 +437,8 @@ function denseFake ({ perWindow, dstOldest, capture }) {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
-      const flux = Buffer.concat(chunks).toString()
+      let flux = Buffer.concat(chunks).toString()
+      try { flux = JSON.parse(flux).query || flux } catch {} // queries are a JSON envelope now
       if (req.url.startsWith('/api/v2/write')) { res.statusCode = 204; res.end(); return }
       res.setHeader('Content-Type', 'application/csv')
       if (flux.includes('schema.tagValues')) {
@@ -506,4 +510,63 @@ test('the walk starts below what live sync already covers, not at now', async ()
   // every window walked must be older than the ceiling — no re-upload of live-covered data
   assert.ok(Object.keys(st.done).every((k) => Date.parse(k) <= st.ceiling),
     'no window newer than the ceiling was touched')
+})
+
+// --- field types must come from the source, not from guessing (v0.18.1) -------------
+// A raw-Flux request body cannot carry a dialect, so InfluxDB returns UNANNOTATED CSV
+// and types have to be inferred from the text. That is wrong in a way that breaks the
+// write outright, and it stopped a real migration dead:
+//   422 partial write: field type conflict: input field "value" on measurement "network…"
+
+test('a string field stays a string even when its value looks numeric', () => {
+  // The exact case: network.ip holds "8" and "1.2.3.4". Inferred, "8" is emitted bare
+  // (a float) and "1.2.3.4" quoted (a string) — one field, two types, one rejected batch.
+  const doc = CSV('string,long,dateTime:RFC3339,string,string,string',
+    'result,table,_time,_value,_field,_measurement',
+    '_result,0,2026-07-19T10:00:00Z,8,value,network.ip',
+    '_result,0,2026-07-19T10:00:01Z,1.2.3.4,value,network.ip')
+  const { lines } = csvToLineProtocol(doc)
+  assert.strictEqual(lines.length, 2)
+  assert.match(lines[0], /value="8"/, 'a numeric-looking string is still quoted')
+  assert.match(lines[1], /value="1\.2\.3\.4"/)
+  assert.ok(lines.every((l) => /value="/.test(l)), 'both rows declare the SAME type')
+})
+
+test('without the annotation the same input would produce two types (why we ask for it)', () => {
+  const noAnnotation = ',result,table,_time,_value,_field,_measurement\r\n' +
+    ',_result,0,2026-07-19T10:00:00Z,8,value,network.ip\r\n' +
+    ',_result,0,2026-07-19T10:00:01Z,1.2.3.4,value,network.ip\r\n'
+  const { lines } = csvToLineProtocol(noAnnotation)
+  const quoted = lines.filter((l) => /value="/.test(l)).length
+  assert.strictEqual(quoted, 1, 'inference splits one field across two types — the 422')
+})
+
+test('source queries request the datatype annotation', async () => {
+  const bodies = []
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      if (req.url.startsWith('/api/v2/write')) { res.statusCode = 204; res.end(); return }
+      bodies.push(Buffer.concat(chunks).toString())
+      res.setHeader('Content-Type', 'application/csv')
+      res.end('#datatype,string,long,string\r\n,result,table,_value\r\n,_result,0,vessels.mine\r\n')
+    })
+  })
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'o', bucket: 'b', token: 'R' },
+    dst: { url, org: 'o', bucket: 'b_raw', token: 'RW' },
+    selfContext: 'vessels.mine', stateFile: tmpFile(), idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  assert.ok(bodies.length > 0, 'queries were sent')
+  const parsed = bodies.map((b) => { try { return JSON.parse(b) } catch { return null } })
+  assert.ok(parsed.every(Boolean), 'every query is a JSON envelope, not a raw flux body')
+  assert.ok(parsed.every((j) => (j.dialect || {}).annotations || [].includes),
+    'and carries a dialect')
+  assert.ok(parsed.every((j) => (j.dialect.annotations || []).includes('datatype')),
+    'asking for datatype specifically')
 })
