@@ -16,20 +16,85 @@
 > Self-hosters can point the plugin at their own sailkick server and InfluxDB v2
 > instead — see [Config](#config).
 
-One Signal K plugin, independently-toggleable modules — so the boat stays
-"just SignalK + plugins":
+One Signal K plugin doing four jobs, each independently toggleable — so the boat stays
+"just SignalK + plugins". They are deliberately separate modules: a fault in the cache
+must never wedge the data-critical sync path.
 
-- **`sync`** — gapless store-and-forward of self-vessel telemetry to InfluxDB v2
-  (durable spool; survives offline + restarts). Data **out**.
-- **`proxy`** — offline-first caching **mirror of the sailkick host**: fetch once
-  online, serve from disk forever (incl. offline). Data **in**.
-- served alongside the mirror, from the boat's **own** data (so the app uses the
-  same contracts as the cloud, offline-first):
-  - **`/ws/telemetry`** — the app's live telemetry bus, fed from local SignalK.
-  - **`/api/history/{series,track}`** — the app's Trends panel + track, served
-    from a live ring sampled on the boat — full local history, no database.
+**1. Data out — telemetry and AIS to the cloud.** Gapless store-and-forward of this
+vessel's data into your sailkick account, so the cloud holds your history and (later)
+can analyse it. Buffered on disk, so an offline passage or a restart loses nothing.
+Locally-received AIS targets go up too, letting you see the boat's surroundings from
+shore.
 
-Kept as separate modules so a proxy fault can't wedge the data-critical sync path.
+**2. Data in — the app and its maps, cached for offline.** An offline-first mirror of
+the sailkick host: fetch once online, serve from disk forever. Charts, terrain, the app
+itself. Plus a worldwide base map seeded on start and an on-demand download of the area
+around the boat, so a usable chart exists before you lose connectivity — not only where
+you happened to browse.
+
+**3. Live data, served by the boat itself.** Caching alone would leave you offline with
+a dead app: no position, no instruments, no trends, no AIS, and a login wall. So the
+boat *answers* the app's live contracts from its own SignalK — `/ws/telemetry`,
+`/api/history/{series,track}`, `/api/ais` — and serves `/api/config` with the cloud
+login disabled. Same JSON the cloud returns, so the browser cannot tell the difference.
+
+**4. Backfill — an existing InfluxDB archive into the cloud.** If the boat recorded
+into its own database before it ever synced (a `signalk-to-influxdb-v2` bucket, or an
+imported logbook), a one-time resumable copy lifts that history into the cloud where the
+app can reach it.
+
+
+# 1 · Data out — telemetry and AIS to the cloud
+
+## Telemetry sync — gapless by design
+Every value on `vessels.self` is batched, written to a durable on-disk spool as one
+atomic file, and only then uploaded. A file is deleted **only** after InfluxDB
+acknowledges it with a `204`, so an offline stretch or a Signal K restart simply leaves
+files to send later — nothing is lost in the gap.
+
+- Network errors, `429` and `5xx` are retried with backoff (1 s → 60 s); the data stays
+  on disk.
+- A `4xx` is quarantined to `spool/dead/` rather than retried forever, because a
+  malformed or unauthorised batch would otherwise wedge the queue behind it.
+- The buffer is bounded (500 MB). On overflow the **oldest** files are dropped and
+  logged — a long-offline boat fills its own disk otherwise.
+- Timestamps are nanosecond-precise, so replaying after a reconnect overwrites rather
+  than duplicating. Re-sending is always safe.
+
+The destination is fixed at `https://sync.sailkick.io` and cannot be changed from the
+config page — a wrong endpoint here is invisible, since telemetry piling up in the spool
+looks exactly like a normal offline backlog. See
+[Troubleshooting](#troubleshooting-is-telemetry-actually-leaving-the-boat).
+
+## Uploading AIS targets
+The cloud app already draws other vessels, but its AIS source polls a SignalK server over
+the LAN and keeps everything in memory — which cannot work once a boat is on a mobile
+link. Enable **Upload AIS targets** and the boat pushes what its own receiver hears, so
+the web app can show other boats, their heading and their trail from stored data.
+
+Only **locally received** AIS is forwarded. A boat running an internet feed such as
+`signalk-aisstream` would otherwise spend uplink bandwidth sending data the cloud can
+fetch directly from the same API — known feeds are skipped automatically. The plugin logs
+the AIS sources it sees, so you can name your own receiver in **Only this AIS source** if
+you want to be explicit.
+
+There is no radius or rate limit: a real AIS receiver is bounded by VHF line-of-sight,
+which is the honest limiter, and offshore — where this data is most valuable, because
+commercial feeds are blind there — it tends to zero. Vessel identity (name, dimensions,
+ship type) repeats every few minutes and never changes, so it is re-sent at most hourly;
+positions are never throttled.
+
+Telemetry always wins the link. AIS buffers in its **own** spool with its own cap and
+stands down completely whenever the telemetry spool has a backlog, so a busy anchorage
+can never delay or evict your own boat's data.
+
+> ⚠️ **Requires a cloud that filters history on `self`.** Every AIS row is tagged
+> `self=false`, and the cloud's Trends and track queries must filter `self == "true"`.
+> Without that, other ships' speed and heading appear in *your* charts. Leave this off
+> until the server side is in place.
+
+
+# 2 · Data in — the app and its maps, cached offline
 
 ## Proxy: how it works
 ```
@@ -128,6 +193,9 @@ passage area on demand.
 Note: the app's **Coastline** and depth layers are default-off toggles — enable them in
 the app to see the seeded base.
 
+
+# 3 · Live data, served by the boat
+
 ## No login on the boat (single-tenant)
 The cloud app gates behind a boat-account login (a `Secure` session cookie), which
 can't work over the boat's plain-HTTP offline mirror — the browser drops a `Secure`
@@ -171,32 +239,8 @@ the chart.
 This works **with no uplink at all**, which is when other vessels on your chart matter
 most. Turn it off by hand-editing `proxy.serveAis: false`.
 
-## Uploading AIS targets
-The cloud app already draws other vessels, but its AIS source polls a SignalK server over
-the LAN and keeps everything in memory — which cannot work once a boat is on a mobile
-link. Enable **Upload AIS targets** and the boat pushes what its own receiver hears, so
-the web app can show other boats, their heading and their trail from stored data.
 
-Only **locally received** AIS is forwarded. A boat running an internet feed such as
-`signalk-aisstream` would otherwise spend uplink bandwidth sending data the cloud can
-fetch directly from the same API — known feeds are skipped automatically. The plugin logs
-the AIS sources it sees, so you can name your own receiver in **Only this AIS source** if
-you want to be explicit.
-
-There is no radius or rate limit: a real AIS receiver is bounded by VHF line-of-sight,
-which is the honest limiter, and offshore — where this data is most valuable, because
-commercial feeds are blind there — it tends to zero. Vessel identity (name, dimensions,
-ship type) repeats every few minutes and never changes, so it is re-sent at most hourly;
-positions are never throttled.
-
-Telemetry always wins the link. AIS buffers in its **own** spool with its own cap and
-stands down completely whenever the telemetry spool has a backlog, so a busy anchorage
-can never delay or evict your own boat's data.
-
-> ⚠️ **Requires a cloud that filters history on `self`.** Every AIS row is tagged
-> `self=false`, and the cloud's Trends and track queries must filter `self == "true"`.
-> Without that, other ships' speed and heading appear in *your* charts. Leave this off
-> until the server side is in place.
+# 4 · Backfill — an existing archive into the cloud
 
 ## Copying older history to the cloud (one-time)
 If the boat recorded into its own InfluxDB before it started syncing — a
@@ -286,6 +330,9 @@ Same JSON the cloud returns, so the browser can't tell the difference — but it
 works **offline** with the boat's own data. Only when no telemetry source is
 available at all do these paths **fall through to the cloud mirror**, so an
 online boat is never worse off than before.
+
+
+# Running it
 
 ## Setup: register on the web, then paste the token
 1. Register your boat at **[www.sailkick.io](https://www.sailkick.io)** (an invite code
@@ -388,6 +435,23 @@ curl -i -XPOST "https://sync.sailkick.io/api/v2/write?org=sailkick&bucket=<slug>
   -H "Authorization: Token $TOKEN" --data-binary "probe,context=vessels.self,self=true,source=manual value=1"
 ```
 `204` = good, `401` = token not valid for that bucket.
+
+## Known gaps
+Things this deliberately does not do yet, so they don't come as a surprise:
+
+- **Wind and current fields are not prefetched.** Velocity tiles are pinned once fetched
+  (they are keyed by forecast run, so they never go stale), but nothing warms them ahead
+  of time — offline, the wind field covers only where you have already panned. Old
+  forecast runs are also never pruned, so their tiles accumulate.
+- **The backfill cannot fill gaps in live coverage.** It only copies data *older* than
+  the point where cloud sync began, so if live sync ever dropped data — an outage longer
+  than the spool's capacity — that hole stays, even when the local archive still has it.
+- **Backfilled history is not browsable in the app.** `/api/history/*` accepts only a
+  relative window clamped to 24 h, so once 2024 is in the cloud there is still no way to
+  display it. That needs `from`/`to` support server-side.
+- **Per-path sync rate is approximate.** The subscription sets `period` without a
+  `policy`, so Signal K's default governs and a few chatty paths exceed the configured
+  interval.
 
 ## Dev / tests
 ```bash
