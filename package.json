@@ -1,6 +1,6 @@
 {
   "name": "sailkick-boat",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "description": "EARLY ALPHA — cloud telemetry + offline maps for sailkick boats (www.sailkick.io; register on the web, paste the write token). Gapless boat→cloud telemetry sync to InfluxDB, and a local proxy that keeps the sailkick app and its charts/maps working fully offline on board.",
   "main": "index.js",
   "scripts": {

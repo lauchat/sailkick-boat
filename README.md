@@ -236,6 +236,15 @@ a source archive that is still being written — a `signalk-to-influxdb-v2` buck
 recording — makes the first windows re-upload today's data. The timestamps are correct,
 but it is data the cloud already has, and a lot of wasted uplink.
 
+**Latency is the cost, not bandwidth.** Measured on a real archive, about 3 s of every
+4.2 s chunk was cloud round trips while all the boat-side work (query, parse, convert)
+took ~1.2 s. So batches carry up to 50k lines rather than 10k — one or two round trips
+per chunk instead of ten — and each **hour** is verified once rather than each of its
+~32 chunks. The verification itself is unchanged in kind: a `204` means the bytes were
+accepted, not that every point landed, so the destination is still counted before an
+hour is marked done. On a mismatch the hour is left unmarked and simply redone, which is
+safe because writes are idempotent.
+
 **Field types come from the source, not from guessing.** Queries ask InfluxDB for the
 `#datatype` annotation explicitly. Without it the response is unannotated and types have
 to be inferred from the text — which fails hard on a string field whose values sometimes

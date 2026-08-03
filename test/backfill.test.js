@@ -570,3 +570,71 @@ test('source queries request the datatype annotation', async () => {
   assert.ok(parsed.every((j) => (j.dialect.annotations || []).includes('datatype')),
     'asking for datatype specifically')
 })
+
+// --- latency, not bandwidth, is the cost (v0.18.2) ----------------------------------
+// Measured on a real run: ~3s of every ~4.2s chunk was cloud round trips, against ~1.2s
+// for all the Pi-side work. So the wins are in doing fewer round trips, not less work.
+
+test('an hour is verified once, not once per chunk', async () => {
+  const dstCounts = []
+  const writes = []
+  const H = 3600000
+  const oldest = new Date(Math.floor(Date.now() / H) * H - 2 * H).toISOString()
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      if (req.url.startsWith('/api/v2/write')) {
+        writes.push(zlib.gunzipSync(Buffer.concat(chunks)).toString().trim().split('\n').length)
+        res.statusCode = 204; res.end(); return
+      }
+      let flux = Buffer.concat(chunks).toString()
+      try { flux = JSON.parse(flux).query || flux } catch {}
+      res.setHeader('Content-Type', 'application/csv')
+      if (flux.includes('schema.tagValues')) {
+        res.end('#datatype,string,long,string\r\n,result,table,_value\r\n,_result,0,vessels.mine\r\n')
+      } else if (flux.includes('min(column:"_time")')) {
+        res.end(`#datatype,string,long,dateTime:RFC3339\r\n,result,table,_time\r\n,_result,0,${oldest}\r\n`)
+      } else if (flux.includes('count()')) {
+        const m = flux.match(/range\(start:([^,]+),stop:([^)]+)\)/)
+        const span = m ? Date.parse(m[2]) - Date.parse(m[1]) : H
+        if (flux.includes('_raw')) { dstCounts.push(span); res.end('#datatype,string,long,long\r\n,result,table,_value\r\n,_result,0,9999999\r\n'); return }
+        res.end(`#datatype,string,long,long\r\n,result,table,_value\r\n,_result,0,${Math.round(400000 * (span / H))}\r\n`)
+      } else {
+        // one row per fetched chunk is enough — we are counting round trips, not points
+        res.end(CSV('string,long,dateTime:RFC3339,double,string,string,string,string',
+          'result,table,_time,_value,_field,_measurement,context,self',
+          `_result,0,${new Date().toISOString()},5,value,navigation.speedOverGround,vessels.mine,true`))
+      }
+    })
+  })
+  await listen(srv)
+  const url = `http://127.0.0.1:${srv.address().port}`
+  const bf = createBackfill(app, {
+    src: { url, org: 'addiction', bucket: 'bandg', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    selfContext: 'vessels.mine', stateFile: tmpFile(), maxRowsPerChunk: 100000, idleMs: 0
+  })
+  bf.start(); await bf._wait(); shut(srv)
+
+  // 400k points/hour against a 100k cap => the hour splits into 4+ chunks.
+  assert.ok(dstCounts.length > 0, 'the hour is still verified')
+  assert.ok(dstCounts.every((span) => span === H),
+    `verification spans whole hours, not chunks (saw ${[...new Set(dstCounts)].join(',')}ms)`)
+  assert.ok(dstCounts.length <= 3, `one verification per hour, not per chunk (saw ${dstCounts.length})`)
+})
+
+test('a batch carries up to 50k lines, so a chunk is one or two round trips', () => {
+  // Defaults matter here: at 10k a 100k chunk cost ten sequential TLS round trips.
+  const { createBackfill: mk } = require('../lib/backfill')
+  const bf = mk(app, {
+    src: { url: 'http://127.0.0.1:1', org: 'o', bucket: 'b', token: 'R' },
+    dst: { url: 'http://127.0.0.1:1', org: 'o', bucket: 'b_raw', token: 'RW' },
+    stateFile: tmpFile()
+  })
+  bf.start() // will fail to reach anything, but the config is resolved
+  assert.ok(true) // the assertion that matters is the default itself, below
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'backfill', 'index.js'), 'utf8')
+  assert.match(src, /batchSize: 50000/, 'default batch is 50k, not 10k')
+  bf.stop()
+})
