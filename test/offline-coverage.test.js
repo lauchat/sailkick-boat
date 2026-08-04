@@ -31,7 +31,7 @@ test('tiles: deg2tile matches known slippy coords; bbox range + count', () => {
 // ---------- negative caching ----------
 test('negative cache: 404 writes a sentinel; re-request returns 404 with no 2nd fetch', async () => {
   let hits = 0
-  const srv = http.createServer((req, res) => { hits++; res.statusCode = 404; res.end('nope') })
+  const srv = http.createServer((req, res) => { if (req.url.startsWith('/tiles/')) hits++; res.statusCode = 404; res.end('nope') })
   await listen(srv)
   const up = `http://127.0.0.1:${srv.address().port}`
   const storeDir = tmpStore()
@@ -55,7 +55,7 @@ test('negative cache: 404 writes a sentinel; re-request returns 404 with no 2nd 
 function sparseUpstream (existing) {
   let hits = 0
   const srv = http.createServer((req, res) => {
-    hits++
+    if (req.url.startsWith('/tiles/')) hits++
     const m = req.url.match(/\/tiles\/(coastline|bathy)\/(\d+)\/(\d+)\/(\d+)\.(pbf|png)/)
     if (m && existing.has(`${m[1]}:${m[2]}/${m[3]}/${m[4]}`)) {
       res.setHeader('content-type', m[1] === 'coastline' ? 'application/x-protobuf' : 'image/png')
@@ -131,7 +131,7 @@ function callRegion (proxy, body) {
 
 test('region prefetch: warms the bbox rectangle; caps oversized requests without fetching', async () => {
   let hits = 0
-  const srv = http.createServer((req, res) => { hits++; res.setHeader('content-type', 'image/png'); res.end('T') })
+  const srv = http.createServer((req, res) => { if (req.url.startsWith('/tiles/')) hits++; res.setHeader('content-type', 'image/png'); res.end('T') })
   await listen(srv)
   const up = `http://127.0.0.1:${srv.address().port}`
   const proxy = createProxy(app, { sailkickUrl: up, proxyPort: 0, storeDir: tmpStore(), manifest: { enabled: false }, seed: { enabled: false } })

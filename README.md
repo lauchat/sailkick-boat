@@ -181,6 +181,31 @@ passage area on demand.
   boat's current position from local SignalK, builds a box, and warms the chart layers
   in the background (progress in the status line). Idempotent; re-saving tops up. An
   oversized radius+detail is refused (reduce one). Config `prefetchRadiusNm` / `prefetchDetailZoom`.
+
+  **Each layer is clamped to the zoom it actually publishes**, read from the upstream's
+  `/api/assets` (with a built-in fallback so it still works offline). Coastline tops out
+  at z13 where osm-standard reaches z19, so asking for "Harbor (z15)" fetches osm, seamap
+  and bathy to 15 and coastline only to 13 — instead of spending ~23% of the budget on
+  coastline tiles that can only 404. Those refusals also counted toward the cap, so a
+  request could be turned away for tiles that were never there.
+
+  **What fits under the 150k cap** (four layers, mid-latitude, from z6):
+
+  | radius | z12 | z13 | z14 | z15 |
+  |---|---|---|---|---|
+  | 25 nm | 1.1k | 4.1k | 12.5k | 46k |
+  | 50 nm | 4.1k | 15.3k | 48k | 179k ✗ |
+  | 100 nm | 15.5k | 60k | 192k ✗ | 715k ✗ |
+
+  So **50 nm at z14** or **25 nm at z15** are the practical maxima. A refused request
+  pre-warms *nothing* — check the status line rather than assuming coverage exists.
+
+**Resolution is only limited when pre-warming.** On-demand caching has no zoom ceiling:
+whatever the browser requests while online is stored and served offline afterwards, up to
+the upstream's own maximum (z19 for osm-standard, z18 seamap). Browse a harbour approach
+once with a connection and it is yours. Pre-warming is capped at z15 by the settings
+dropdown — 3.5 m/px, ample for coastal work but coarser than the z17–18 you might want
+alongside a berth.
 - **Region prefetch (API)** — for scripted/arbitrary boxes, warm the detailed chart layers for an area:
   ```
   POST /plugins/sailkick-boat/prefetch/region
