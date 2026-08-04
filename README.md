@@ -2,22 +2,17 @@
 
 > ## ⚠️ Project status: alpha
 >
-> Provides an offline webapp and mobile app for boat metrics. Weather, climatology
-> and basic routing capabilities.
-> With a sailkick account it provides boat metrics real-time cloud synchronisation,
-> polars, an optional public page for others to follow the boat or for you to see boat
-> metrics while on the go. 
-> 
-> **Registration is free and invite-only** Im looking for courageous early testers,
-> if you feel like testing the plugin, please write me an email:
-> **[info@sailkick.io](mailto:info@sailkick.io)**
+> An offline webapp and mobile app for boat metrics, with weather, climatology and
+> basic routing. Add a sailkick account and you also get real-time cloud sync of those
+> metrics, polars, and an optional public page — so others can follow the boat, or you
+> can check on it while you are away.
+>
+> **Registration is free, and invite-only.** I'm looking for courageous early testers:
+> if you would like to try the plugin, email **[info@sailkick.io](mailto:info@sailkick.io)**.
+> Self-hosters can point it at their own sailkick server and InfluxDB v2 instead — see
+> [Config](#config).
 >
 > Expect breaking changes while the version is 0.x.
->
-> **Want an invite, or more information?** Get in touch:
-> **[info@sailkick.io](mailto:info@sailkick.io)**. Early testers are welcome.
-> Self-hosters can point the plugin at their own sailkick server and InfluxDB v2
-> instead — see [Config](#config).
 
 One Signal K plugin doing four jobs, each independently toggleable — so the boat stays
 "just SignalK + plugins". They are deliberately separate modules: a fault in the cache
