@@ -108,7 +108,9 @@ test('strategy split: velocity tiles pinned, everything else under /api live', (
     '/api/lightning/lightning?bbox=1,2,3,4&since=3600',
     '/api/ais', '/api/config', '/api/wind', '/api/forecast', '/api/assets'
   ]
-  const cacheFirst = ['/tiles/bathy/3/4/5.png', '/index.html', '/health', '/terrain/layer.json']
+  // /index.html and /health moved to network-first in v0.18.4 — see the entry-document
+  // test below. Only immutable-by-URL content stays pinned.
+  const cacheFirst = ['/tiles/bathy/3/4/5.png', '/terrain/layer.json', '/assets/main-abc.js']
 
   for (const p of pinned) {
     assert.ok(isImmutableApi(p), `${p} is immutable`)
@@ -165,4 +167,48 @@ test('a bake announcement does not churn immutable velocity tiles', async () => 
   assert.strictEqual(r.cacheState, 'HIT')
   assert.strictEqual(r.buffer.toString(), 'first', 'run-keyed bytes are never re-fetched')
   await new Promise((res) => srv.close(res))
+})
+
+// --- the app shell must not be pinned (v0.18.4) -------------------------------------
+// Content-hashed assets can be pinned forever because a new build gives them new URLs.
+// index.html is the one file whose URL never changes, so pinning it keeps a boat on
+// whatever version it cached first — which is exactly what happened: the cache manifest
+// announces an `app` id that is the package version, and three deploys in one day all
+// reported "0.2.0", so nothing was ever invalidated.
+const { isEntryDocument } = require('../lib/proxy')
+
+test('strategy: entry documents are live, hashed assets stay pinned', () => {
+  for (const p of ['/', '/index.html', '/mobile/', '/manifest.webmanifest']) {
+    assert.strictEqual(isEntryDocument(p), true, `${p} is an entry document`)
+    assert.strictEqual(isNetworkFirst(p), true, `${p} must be fetched fresh`)
+  }
+  for (const p of ['/assets/main-Cm1RhM4y.js', '/assets/main-BboaeyYc.css', '/tiles/bathy/3/4/5.png', '/cesium/Cesium.js', '/terrain/layer.json']) {
+    assert.strictEqual(isNetworkFirst(p), false, `${p} must stay pinned`)
+  }
+})
+
+test('a redeployed app shell reaches the boat, and still opens offline', async () => {
+  let html = '<html><script src="/assets/main-OLD.js"></script></html>'
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-type', req.url.endsWith('.js') ? 'application/javascript' : 'text/html')
+    res.end(req.url.endsWith('.js') ? `// ${req.url}` : html)
+  })
+  await listen(srv)
+  const up = `http://127.0.0.1:${srv.address().port}`
+  const storeDir = tmpStore()
+  const opts = { storeDir, upstream: up, reqPath: '/', networkFirst: isNetworkFirst('/') }
+
+  let r = await getResource(opts)
+  assert.match(r.buffer.toString(), /main-OLD\.js/)
+
+  // the cloud redeploys; the manifest `app` id does NOT change (the bug this works around)
+  html = '<html><script src="/assets/main-NEW.js"></script></html>'
+  r = await getResource(opts)
+  assert.strictEqual(r.cacheState, 'LIVE')
+  assert.match(r.buffer.toString(), /main-NEW\.js/, 'the boat picks up the new build with no invalidation signal')
+
+  await new Promise((res) => srv.close(res)) // go to sea
+  r = await getResource({ ...opts, timeoutMs: 600 })
+  assert.strictEqual(r.cacheState, 'STALE')
+  assert.match(r.buffer.toString(), /main-NEW\.js/, 'and the last-seen shell still opens offline')
 })

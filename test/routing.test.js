@@ -44,12 +44,16 @@ test('routes /signalk -> local SignalK (HTTP + WebSocket), else -> mirror', asyn
   assert.strictEqual(await live.text(), '{"local":true}', 'live data from local SignalK')
   assert.strictEqual(live.headers.get('x-sailkick-cache'), null, 'not cached')
 
-  // everything else -> mirror the sailkick host (cached)
-  const appMiss = await fetch(base + '/')
-  assert.strictEqual(await appMiss.text(), '<html>APP</html>')
-  assert.strictEqual(appMiss.headers.get('x-sailkick-cache'), 'MISS')
-  const appHit = await fetch(base + '/')
-  assert.strictEqual(appHit.headers.get('x-sailkick-cache'), 'HIT')
+  // everything else -> mirror the sailkick host. The app SHELL is network-first (its URL
+  // never changes across deploys, so pinning it would freeze the boat on one build);
+  // the hashed assets it pulls in are cache-first.
+  const appLive = await fetch(base + '/')
+  assert.strictEqual(await appLive.text(), '<html>APP</html>')
+  assert.strictEqual(appLive.headers.get('x-sailkick-cache'), 'LIVE')
+  const assetMiss = await fetch(base + '/assets/main-abc.js')
+  assert.strictEqual(assetMiss.headers.get('x-sailkick-cache'), 'MISS')
+  const assetHit = await fetch(base + '/assets/main-abc.js')
+  assert.strictEqual(assetHit.headers.get('x-sailkick-cache'), 'HIT', 'hashed assets stay pinned')
 
   // WebSocket upgrade on /signalk -> relayed to local SignalK
   const wsResp = await new Promise((resolve, reject) => {

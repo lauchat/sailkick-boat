@@ -33,22 +33,24 @@ test('standalone mirror: serves app root + root-relative assets, caches, offline
   // app root (the "drop a URL" entry)
   const root = await fetch(base + '/')
   assert.strictEqual(root.status, 200)
-  assert.strictEqual(root.headers.get('x-sailkick-cache'), 'MISS')
+  assert.strictEqual(root.headers.get('x-sailkick-cache'), 'LIVE', 'the shell is fetched fresh, never pinned')
   assert.strictEqual(await root.text(), '<html>APP</html>')
   // a root-relative asset the app references (would 404 under a /plugins/ prefix)
   const asset = await fetch(base + '/assets/index-abc.js')
   assert.strictEqual(asset.status, 200)
   assert.strictEqual(asset.headers.get('content-type'), 'application/javascript')
-  // second hit served from cache
+  // the asset is served from cache; the shell is re-checked so a redeploy reaches the boat
+  const againAsset = await fetch(base + '/assets/index-abc.js')
+  assert.strictEqual(againAsset.headers.get('x-sailkick-cache'), 'HIT', 'hashed asset pinned')
   const again = await fetch(base + '/')
-  assert.strictEqual(again.headers.get('x-sailkick-cache'), 'HIT')
-  assert.strictEqual(up.hits(), 2, 'root + asset fetched once each; repeat from cache')
+  assert.strictEqual(again.headers.get('x-sailkick-cache'), 'LIVE')
 
   // offline: kill upstream, cached root still served
   up.srv.closeAllConnections && up.srv.closeAllConnections(); up.srv.close()
   const offline = await fetch(base + '/')
   assert.strictEqual(offline.status, 200)
-  assert.strictEqual(offline.headers.get('x-sailkick-cache'), 'HIT')
+  assert.strictEqual(offline.headers.get('x-sailkick-cache'), 'STALE', 'last-seen shell still opens the app offline')
+  assert.strictEqual(await offline.text(), '<html>APP</html>')
 
   proxy.stop()
   // server closed -> connection refused

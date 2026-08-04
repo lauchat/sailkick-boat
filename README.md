@@ -125,6 +125,14 @@ comes from the cloud **announcing bakes**, not from a clock:
 
 `X-Sailkick-Cache` reports `HIT` / `MISS` / `UPDATED` / `STALE` / `LIVE` per response.
 
+**The app itself is never pinned.** `/`, any `index.html`, the web manifest and `/health`
+are fetched fresh whenever online. They are the only files whose URL does not change
+between deploys — everything they pull in is content-hashed (`main-Cm1RhM4y.js`), so a
+fresh shell drags in a new build as ordinary cache misses, and the old hashed files just
+sit there harmlessly. Pin the shell instead and the boat stays on whatever build it
+cached first, forever. Offline the last-seen shell is served as `STALE`, so the app still
+opens with no uplink.
+
 **Static vs dynamic — two strategies.** Tiles and app assets are **cache-first**
 (pinned, offline forever). Dynamic `/api/*` data (AIS, weather, lightning) is
 **network-first**: fetched live every time online (so it never goes stale), with the
