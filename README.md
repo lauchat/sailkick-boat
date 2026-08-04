@@ -259,6 +259,43 @@ uploads is verified by counting the destination, and a write-only token cannot r
 a partial write would be marked done and lost. The token is only needed while the
 backfill runs: **revoke it afterwards**, live sync is unaffected.
 
+> The two tokens a boat normally has are **both insufficient**: the scoped read token
+> cannot write (`403 insufficient permissions for write`) and the scoped write token
+> cannot verify. Mint one carrying *both* permissions on `<slug>_raw`.
+
+### What to expect
+This is a background job measured in **days or weeks**, not minutes. Measured on a real
+boat — a Raspberry Pi over Starlink, migrating a `signalk-to-influxdb-v2` archive of
+~57 GB going back 20 months:
+
+| | |
+|---|---|
+| sustained throughput | ~10,000 points/s |
+| archive consumed | ~24× realtime |
+| a dense hour (2.7M points) | subdivides into ~30 chunks |
+
+It gets faster as it goes: the walk is newest-first and older data is usually sparser
+(that boat's recent hours held ~2.7M points, its oldest ~0.8M). Leave it running — it
+survives restarts, and it yields to live telemetry so it cannot delay your own boat's
+data.
+
+**Watching progress.** The status line shows the current window and running total. For
+detail, the manifest lists every completed hour:
+
+```bash
+cat <dataDir>/backfill.json    # {"done":{...},"points":532062426,"complete":false}
+```
+
+From the cloud side, the oldest point in your bucket marches backwards as it works — that
+is the single clearest signal that it is delivering:
+
+```flux
+from(bucket:"<slug>_raw")|>range(start:0)|>keep(columns:["_time"])|>group()|>min(column:"_time")
+```
+
+Once the bucket is large that query gets expensive; counting a single one-hour window
+near the frontier is cheaper and tells you the same thing.
+
 Safe to re-run. Points are keyed by (measurement, tagset, nanosecond timestamp), so an
 identical point overwrites rather than duplicating — an interrupted migration is simply
 run again.
