@@ -1,15 +1,18 @@
 # sailkick-boat
 
-> ## ⚠️ Project status: early alpha — invite only
+> ## ⚠️ Project status: alpha
 >
-> This plugin is the **boat-side companion of the sailkick platform**: **cloud
-> telemetry** (gapless boat→shore sync of your vessel's data into a central InfluxDB)
-> and a **local proxy that keeps the sailkick app and its charts/maps fully usable
-> offline** on board. The service runs at **[www.sailkick.io](https://www.sailkick.io)**.
+> Provides an offline webapp and mobile app for boat metrics. Weather, climatology
+> and basic routing capabilities.
+> With a sailkick account it provides boat metrics real-time cloud synchronisation,
+> polars, an optional public page for others to follow the boat or for you to see boat
+> metrics while on the go. 
+> 
+> **Registration is free and invite-only** Im looking for courageous early testers,
+> if you feel like testing the plugin, please write me an email:
+> **[info@sailkick.io](mailto:info@sailkick.io)**
 >
-> **Registration is invite-only** and happens on the website, not in the plugin — so
-> installing this from the Signal K Appstore is not enough on its own. Expect breaking
-> changes while the version is 0.x.
+> Expect breaking changes while the version is 0.x.
 >
 > **Want an invite, or more information?** Get in touch:
 > **[info@sailkick.io](mailto:info@sailkick.io)**. Early testers are welcome.
