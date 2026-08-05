@@ -121,3 +121,137 @@ test('maps STW, measured true wind, attitude and autopilot (the drifted cases)',
   assert.ok(Math.abs(p.apTargetDeg - 90) < 0.01)
   assert.ok(Math.abs(p.apTargetAwa + 45) < 0.01)
 })
+
+// --- second drift, found v0.18.6 ---------------------------------------------------
+// Active-waypoint course data plus TWA/VMG/temperatures/engine rpm. This is why routes
+// and waypoint readouts were blank when the app was served from the boat but fine
+// against the cloud: the deltas arrive (telemetry subscribes to '*') and were dropped
+// on the floor by the mapper.
+test('maps active-waypoint course data under all three SignalK publish prefixes', () => {
+  for (const prefix of ['navigation.courseGreatCircle.nextPoint', 'navigation.courseRhumbline.nextPoint', 'navigation.course.calcValues']) {
+    const p = signalkValuesToPatch([
+      { path: `${prefix}.bearingTrue`, value: Math.PI }, // 180°
+      { path: `${prefix}.distance`, value: 1852 }, // 1 nm
+      { path: `${prefix}.velocityMadeGood`, value: 2.5722 }, // 5 kt
+      { path: `${prefix}.timeToGo`, value: 720 }
+    ])
+    assert.ok(Math.abs(p.wptBrgDeg - 180) < 0.01, prefix + ' bearing')
+    assert.ok(Math.abs(p.wptDistNm - 1) < 0.001, prefix + ' distance')
+    assert.ok(Math.abs(p.wptVmgKt - 5) < 0.01, prefix + ' vmg')
+    assert.strictEqual(p.wptTtgSec, 720, prefix + ' ttg')
+  }
+})
+
+test('a cleared destination clears the waypoint values instead of leaving them stale', () => {
+  // Unlike a sensor, a null here MEANS something. If it were skipped like a missing
+  // sensor reading the ribbon would show the old waypoint numbers forever.
+  const p = signalkValuesToPatch([
+    { path: 'navigation.courseGreatCircle.nextPoint.bearingTrue', value: null },
+    { path: 'navigation.courseGreatCircle.nextPoint.distance', value: null },
+    { path: 'navigation.courseGreatCircle.nextPoint.velocityMadeGood', value: null },
+    { path: 'navigation.courseGreatCircle.nextPoint.timeToGo', value: null }
+  ])
+  assert.deepStrictEqual(p, { wptBrgDeg: null, wptDistNm: null, wptVmgKt: null, wptTtgSec: null })
+  // and a negative time-to-go is not a time
+  assert.strictEqual(signalkValuesToPatch([{ path: 'navigation.course.calcValues.timeToGo', value: -5 }]).wptTtgSec, null)
+})
+
+test('the null clear survives the state merge and reaches the wire', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([
+    { path: 'navigation.position', value: { latitude: 43.29, longitude: 5.36 } },
+    { path: 'navigation.courseGreatCircle.nextPoint.distance', value: 3704 }
+  ]))
+  assert.ok(Math.abs(t._state().wptDistNm - 2) < 0.001)
+  t._ingest(delta([{ path: 'navigation.courseGreatCircle.nextPoint.distance', value: null }]))
+  assert.strictEqual(t._state().wptDistNm, null, 'cleared, not stale')
+  assert.ok(JSON.stringify(t._state()).includes('"wptDistNm":null'), 'null survives serialisation')
+})
+
+test('maps true wind angle, VMG, sea/air temperature and engine revolutions', () => {
+  const p = signalkValuesToPatch([
+    { path: 'environment.wind.angleTrueWater', value: -Math.PI / 4 }, // -45°
+    { path: 'performance.velocityMadeGood', value: -1.0289 }, // -2 kt (losing ground)
+    { path: 'environment.water.temperature', value: 291.15 }, // 18 °C
+    { path: 'environment.outside.temperature', value: 298.15 }, // 25 °C
+    { path: 'propulsion.port.revolutions', value: 30 }, // 1800 rpm
+    { path: 'propulsion.starboard.revolutions', value: 25 } // 1500 rpm
+  ])
+  assert.ok(Math.abs(p.twaDeg + 45) < 0.01)
+  assert.ok(Math.abs(p.vmgKt + 2) < 0.01, 'VMG keeps its sign')
+  assert.ok(Math.abs(p.seaTempC - 18) < 0.01)
+  assert.ok(Math.abs(p.airTempC - 25) < 0.01)
+  assert.ok(Math.abs(p.rpmPort - 1800) < 0.01)
+  assert.ok(Math.abs(p.rpmStbd - 1500) < 0.01)
+})
+
+// --- the guard that should have caught both drifts ---------------------------------
+// Structural parity against the app's own source, when both repos are checked out.
+// It compares the SET of BoatState fields each copy can produce — which is what the
+// app actually consumes — rather than the text, since ours is CommonJS and theirs is
+// an ES module. Skipped (not failed) when the app source isn't present, so npm-only
+// checkouts still pass.
+const fs = require('node:fs')
+const APP_MAP = process.env.SAILKICK_APP_REPO
+  ? `${process.env.SAILKICK_APP_REPO}/public/engine/signalk-map.js`
+  : '/workspace/sailkick/public/engine/signalk-map.js'
+
+test('contract seam: our mapper produces every BoatState field the app\'s does', { skip: !fs.existsSync(APP_MAP) && 'app source not checked out' }, () => {
+  const fields = (src) => new Set([...src.matchAll(/patch\.([A-Za-z]+)\s*=/g)].map((m) => m[1]))
+  const theirs = fields(fs.readFileSync(APP_MAP, 'utf8'))
+  const ours = fields(fs.readFileSync(require.resolve('../lib/telemetry/signalk-map'), 'utf8'))
+  const missing = [...theirs].filter((f) => !ours.has(f)).sort()
+  assert.deepStrictEqual(missing, [], 'fields the app sets and we never emit — re-port lib/telemetry/signalk-map.js')
+})
+
+test('contract seam: the pinned app hash matches the app source we ported from', { skip: !fs.existsSync(APP_MAP) && 'app source not checked out' }, () => {
+  const { PINNED_APP_HASH } = require('../lib/telemetry/contract')
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(APP_MAP)).digest('hex').slice(0, 12)
+  assert.strictEqual(actual, PINNED_APP_HASH,
+    'the app\'s signalk-map.js changed since we ported it — re-port, then update PINNED_APP_HASH in lib/telemetry/contract.js')
+})
+
+// --- runtime drift detection --------------------------------------------------------
+const { createContractCheck } = require('../lib/telemetry/contract')
+
+test('contract check: reports drift, silence when in sync, unknown on old servers', async () => {
+  const warnings = []
+  const stub = { debug () {}, error (m) { warnings.push(m) } }
+  const serve = (body) => http.createServer((req, res) => {
+    if (req.url !== '/health') { res.statusCode = 404; res.end(); return }
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(body))
+  })
+
+  const { PINNED_APP_HASH } = require('../lib/telemetry/contract')
+  const cases = [
+    [{ ok: true, contracts: { signalkMap: 'deadbeefcafe' } }, true, 1],
+    [{ ok: true, contracts: { signalkMap: PINNED_APP_HASH } }, false, 0],
+    [{ ok: true }, null, 0] // a server predating the contract hash → unknown, not a warning
+  ]
+  for (const [body, expected, warns] of cases) {
+    warnings.length = 0
+    const srv = serve(body)
+    await new Promise((r) => srv.listen(0, r))
+    const c = createContractCheck(stub, {})
+    assert.strictEqual(await c.check(`http://127.0.0.1:${srv.address().port}`), expected)
+    assert.strictEqual(warnings.length, warns, JSON.stringify(body))
+    if (expected) assert.match(c.status(), /DRIFTED/)
+    else assert.strictEqual(c.status(), null, 'no status noise unless drifted')
+    await new Promise((r) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(r) })
+  }
+})
+
+test('contract check: offline is not drift, and a drift is logged once, not every poll', async () => {
+  const warnings = []
+  const stub = { debug () {}, error (m) { warnings.push(m) } }
+  const c = createContractCheck(stub, { timeoutMs: 500 })
+  assert.strictEqual(await c.check('http://127.0.0.1:1'), null, 'unreachable → unknown')
+  assert.strictEqual(warnings.length, 0, 'being offline is the normal case, not a warning')
+
+  const srv = http.createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end('{"contracts":{"signalkMap":"0000deadbeef"}}') })
+  await new Promise((r) => srv.listen(0, r))
+  const up = `http://127.0.0.1:${srv.address().port}`
+  await c.check(up); await c.check(up); await c.check(up)
+  assert.strictEqual(warnings.length, 1, 'warned once, not once per 5-minute poll')
+  await new Promise((r) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(r) })
+})
