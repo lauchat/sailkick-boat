@@ -104,8 +104,9 @@ module.exports = function (app) {
     id: 'sailkick-boat',
     name: 'Sailkick boat companion',
     description:
-      'Boat-side sailkick: gapless telemetry sync to the cloud + an offline-first ' +
-      'caching mirror of the sailkick app. Each feature can be toggled on/off.'
+      'Runs the sailkick app on board: charts and maps cached for offline, live data ' +
+      '(position, trends, AIS) served from this boat\'s own SignalK, and telemetry ' +
+      'synced to your sailkick account. Each part can be turned off below.'
   }
 
   plugin.schema = {
