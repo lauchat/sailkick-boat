@@ -237,6 +237,23 @@ so the boat's own app opens with no password, fully offline. Everything else in 
 config passes through untouched. (Hand-edit `proxy.openAccess: false` to keep the cloud
 login gate — there is no toggle, since the gate cannot complete over the mirror anyway.)
 
+## Routes, polars and settings — stored on the boat
+The app reads and writes these through `/api/profile/*`. On the cloud that router is
+session-gated, and the mirror can never satisfy it: the caching GET path forwards no
+headers at all, and the browser is on the boat's LAN origin so it holds no cloud cookie
+to forward either. Every call returned **401** — the route panel showed nothing, saving a
+route failed, and the mobile route-weather deck silently fell back to "Dead reckoning".
+Offline it was a 504.
+
+So the plugin serves `/api/profile/*` itself, from `profile.json` in the plugin's data
+directory (atomic writes, saves serialized so a burst from the route panel can't clobber
+itself). Same envelopes as the cloud, so the app can't tell the difference — and route
+planning now works with no uplink at all, which is when you actually want it.
+
+**This copy is boat-local and does not sync.** A route saved on board stays on board; a
+route saved in the web app stays in the cloud. Merging the two needs conflict resolution
+worth designing properly rather than guessing at, so for now they are simply separate.
+
 ## Local history (offline Trends + track)
 **One source: a live ring**, sampled from the same BoatState that feeds `/ws/telemetry`
 — no database, works on a Victron GX with nothing else installed. `historyAvailable` is
@@ -517,6 +534,10 @@ Things this deliberately does not do yet, so they don't come as a surprise:
 - **Backfilled history is not browsable in the app.** `/api/history/*` accepts only a
   relative window clamped to 24 h, so once 2024 is in the cloud there is still no way to
   display it. That needs `from`/`to` support server-side.
+- **Routes saved on the boat don't reach the cloud, and vice versa.** `/api/profile/*` is
+  served from a file on board because the cloud's copy is session-gated and unreachable
+  from the mirror. The two copies never merge, so a route drawn at anchor won't show up
+  in the web app on shore.
 - **Per-path sync rate is approximate.** The subscription sets `period` without a
   `policy`, so Signal K's default governs and a few chatty paths exceed the configured
   interval.

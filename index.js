@@ -9,6 +9,7 @@ const { createHistory } = require('./lib/history')
 const { createBackfill } = require('./lib/backfill')
 const { createAis } = require('./lib/ais')
 const { createAisTargets } = require('./lib/ais/targets')
+const { createProfile } = require('./lib/profile')
 const { resolveAccountConfig } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
@@ -96,6 +97,7 @@ module.exports = function (app) {
   let backfill = null
   let ais = null
   let aisTargets = null
+  let profile = null
   let statusTimer = null
   let accountStatus = null
   let syncWarning = null
@@ -307,6 +309,18 @@ module.exports = function (app) {
         }
       }
 
+      // Routes / polars / settings, from a file on the boat. The cloud's /api/profile is
+      // session-gated and the mirror can never hold that session, so proxying it always
+      // returned 401 — no saved routes, and route-weather fell back to dead reckoning.
+      try {
+        profile = createProfile(app, {})
+        profile.start()
+        pOpts.profile = profile
+      } catch (e) {
+        (app.error || console.error)('[sailkick-boat] profile start failed: ' + e.message)
+        profile = null
+      }
+
       if (p.serveTelemetry !== false) {
         try {
           telemetry = createTelemetry(app, {})
@@ -419,6 +433,7 @@ module.exports = function (app) {
     if (telemetry) parts.push(telemetry.status())
     if (history) parts.push(history.status())
     if (aisTargets) parts.push(aisTargets.status())
+    if (profile) parts.push(profile.status())
     if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
@@ -431,6 +446,7 @@ module.exports = function (app) {
     try { if (telemetry) telemetry.stop() } catch {}
     try { if (history) history.stop() } catch {}
     try { if (aisTargets) aisTargets.stop() } catch {}
+    try { if (profile) profile.stop() } catch {}
     try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
@@ -440,6 +456,7 @@ module.exports = function (app) {
     backfill = null
     ais = null
     aisTargets = null
+    profile = null
     proxy = null
     accountStatus = null
     syncWarning = null
