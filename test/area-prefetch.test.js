@@ -153,3 +153,47 @@ test('the cap is evaluated by arithmetic, never by enumerating', async () => {
   try { srv.closeAllConnections() } catch {}
   await new Promise((res) => srv.close(res))
 })
+
+// Regression, seen on a real boat (v0.19.0): disabling the plugin while a 46k-tile
+// prefetch was in flight logged
+//   TypeError: Cannot set properties of null (setting 'running')  at lib/proxy/index.js:505
+// stop() nulls the `area` slot, but warmMany keeps going for minutes and its settling
+// handlers wrote straight into that slot. The handlers now hold their own reference.
+test('area prefetch: stopping mid-flight does not throw, and a stale run cannot report into a newer one', async () => {
+  let hits = 0
+  // slow upstream, so the prefetch is guaranteed to still be running when we stop
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith('/tiles/')) hits++
+    setTimeout(() => { res.setHeader('content-type', 'image/png'); res.end('T') }, 15)
+  })
+  await listen(srv)
+  const up = `http://127.0.0.1:${srv.address().port}`
+
+  const rejections = []
+  const onRej = (e) => rejections.push(e)
+  process.on('unhandledRejection', onRej)
+
+  const proxy = createProxy(appAt({ latitude: 40.7, longitude: -74.0 }), {
+    sailkickUrl: up, proxyPort: 0, storeDir: tmpStore(),
+    manifest: { enabled: false }, seed: { enabled: false },
+    prefetch: { radiusNm: 25, detailZoom: 11, concurrency: 2 }
+  })
+  proxy.start()
+  const run = proxy._area()
+  assert.ok(run && run.running, 'prefetch is in flight')
+
+  proxy.stop() // nulls the area slot while warmMany is still going
+  assert.strictEqual(proxy._area(), null, 'slot cleared by stop')
+
+  // the in-flight run must settle cleanly against its own reference
+  await run.promise
+  assert.strictEqual(run.running, false, 'the stale run finished without throwing')
+  assert.strictEqual(proxy._area(), null, 'and did not resurrect the cleared slot')
+
+  await new Promise((r) => setTimeout(r, 50)) // let any rejection surface
+  process.removeListener('unhandledRejection', onRej)
+  assert.deepStrictEqual(rejections, [], 'no unhandled rejection from the settling handlers')
+
+  try { srv.closeAllConnections() } catch {}
+  await new Promise((r) => srv.close(r))
+})
