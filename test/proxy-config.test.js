@@ -138,7 +138,25 @@ test('packaging: declares the webapp keyword, enable-by-default, and ships publi
   assert.ok(pkg.keywords.includes('signalk-node-server-plugin'), 'still a plugin')
   assert.strictEqual(pkg['signalk-plugin-enabled-by-default'], true)
   assert.ok(pkg.files.includes('public/'), 'the launcher page must be in the tarball')
-  const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'public', 'index.html'), 'utf8')
+  const fsp = require('node:fs'); const pth = require('node:path')
+  const html = fsp.readFileSync(pth.join(__dirname, '..', 'public', 'index.html'), 'utf8')
   assert.match(html, /\/plugins\/sailkick-boat\/info/, 'asks the plugin for its port')
   assert.match(html, /mobile\.html/, 'offers the mobile surface')
+
+  // Webapp tile metadata: the admin UI reads signalk.appIcon + signalk.displayName, and
+  // resolves the icon against the mount, which is public/ when that directory exists
+  // (signalk-server interfaces/webapps.js mountWebModules). So an appIcon of './icon.png'
+  // MUST be public/icon.png or the tile renders broken.
+  assert.strictEqual(pkg.signalk && pkg.signalk.displayName, 'Sailkick')
+  const iconRel = pkg.signalk && pkg.signalk.appIcon
+  assert.ok(iconRel, 'declares an app icon')
+  const icon = pth.join(__dirname, '..', 'public', pth.basename(iconRel))
+  assert.ok(fsp.existsSync(icon), `${iconRel} must exist under public/ — that is what gets mounted`)
+  const png = fsp.readFileSync(icon)
+  assert.strictEqual(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'a real PNG')
+  assert.strictEqual(png.readUInt32BE(16), 192, 'square 192px, as the admin UI expects')
+  assert.strictEqual(png.readUInt32BE(20), 192)
+  assert.ok(pkg.files.includes('public/'), 'the icon ships in the tarball')
+  assert.ok(pkg.keywords.some((k) => k.startsWith('signalk-category-')), 'categorised in the app store')
+  assert.match(html, /icon\.png/, 'the launcher shows it too')
 })

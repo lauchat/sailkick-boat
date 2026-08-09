@@ -27,7 +27,8 @@
   body { margin:0; padding:2rem 1rem; background:var(--bg); color:var(--fg);
          font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
   main { max-width:44rem; margin:0 auto }
-  h1 { margin:0 0 .25rem; font-size:1.5rem; letter-spacing:-.01em }
+  h1 { margin:0 0 .25rem; font-size:1.5rem; letter-spacing:-.01em; display:flex; align-items:center; gap:.5rem }
+  h1 img { border-radius:.35rem }
   .sub { color:var(--mut); margin:0 0 1.5rem }
   .grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr)) }
   a.card { display:block; padding:1.1rem 1.2rem; background:var(--card); border:1px solid var(--line);
@@ -44,7 +45,7 @@
 </head>
 <body>
 <main>
-  <h1>Sailkick</h1>
+  <h1><img src="icon.png" alt="" width="28" height="28">Sailkick</h1>
   <p class="sub">Charts, instruments and AIS, served from this boat.</p>
 
   <div class="grid">
