@@ -224,3 +224,63 @@ test('STW is now a history channel, and absent when the boat has no log', () => 
   const noLog = ringOf({ sogKt: 6, headingDeg: 10, awsKt: 12, awaDeg: 45 })
   assert.strictEqual(noLog.stw, undefined, 'empty channels are omitted, not zero-filled')
 })
+
+// --- channel-set parity (v0.20.1) --------------------------------------------------
+// The ring's channel list was frozen at the eight channels that existed before v0.18.6,
+// while BoatState and the app both grew cells for true wind angle, VMG, sea/air
+// temperature, engine revs and the four active-waypoint values. `cog` was worse: it was
+// sampled into every row and then dropped from the output. Eleven of nineteen instrument
+// cells showed a live number and an empty history flyout — but only on the boat, since
+// the cloud provider had them all.
+const { CHANNELS } = require('../lib/history/ring')
+const fsx = require('node:fs')
+
+test('ring: samples and serves every channel the app has a cell for', () => {
+  // A BoatState with every field populated, as the boat actually produces (verified live:
+  // an active waypoint gives wptBrg/wptDist/wptVmg/wptTtg).
+  const state = {
+    sogKt: 5.03, cogDeg: 46.4, headingDeg: 52.3, stwKt: 4.8,
+    awsKt: 12.1, awaDeg: -35, depthM: 62,
+    twsKt: 14.2, twdDeg: 210,
+    twaDeg: -175.1, vmgKt: -5.02,
+    seaTempC: 19.88, airTempC: 41.44,
+    rpmPort: 1762.3, rpmStbd: 0,
+    wptBrgDeg: 54.4, wptDistNm: 4.37, wptVmgKt: 4.99, wptTtgSec: 3152,
+    lat: 43.91, lon: -64.82
+  }
+  const r = new RingHistoryProvider({ source: { getState: () => state }, sampleSec: 1, windowSec: 60 })
+  const { series } = r.getSeries({ windowSec: 60 })
+  r.destroy && r.destroy()
+
+  const missing = CHANNELS.filter((c) => !series[c])
+  assert.deepStrictEqual(missing, [], 'every channel must be served when the value is present')
+  assert.strictEqual(series.cog[0][1], 46.4, 'cog was sampled but never emitted before')
+  assert.strictEqual(series.wptDist[0][1], 4.37)
+  assert.strictEqual(series.rpmStbd[0][1], 0, 'a legitimate zero is not "empty"')
+  assert.ok(Math.abs(series.vmg[0][1] + 5.02) < 1e-9, 'VMG keeps its sign')
+})
+
+test('ring: a cleared destination leaves the waypoint channels absent, not zeroed', () => {
+  const state = { sogKt: 5, cogDeg: 90, headingDeg: 90, lat: 1, lon: 1, wptBrgDeg: null, wptDistNm: null, wptVmgKt: null, wptTtgSec: null }
+  const r = new RingHistoryProvider({ source: { getState: () => state }, sampleSec: 1, windowSec: 60 })
+  const { series } = r.getSeries({ windowSec: 60 })
+  r.destroy && r.destroy()
+  for (const c of ['wptBrg', 'wptDist', 'wptVmg', 'wptTtg']) {
+    assert.strictEqual(series[c], undefined, `${c} omitted when no destination is set`)
+  }
+  assert.ok(series.sog, 'the rest still works')
+})
+
+// Guard against the same drift recurring: the ring's channel names must match the
+// cloud provider's, which is the contract the app's instrument cells are written to.
+// Skipped (not failed) when the app source is not checked out alongside.
+const APP_PROVIDER = process.env.SAILKICK_APP_REPO
+  ? `${process.env.SAILKICK_APP_REPO}/server/history/influx-provider.js`
+  : '/workspace/sailkick/server/history/influx-provider.js'
+
+test('ring: channel set matches the cloud provider', { skip: !fsx.existsSync(APP_PROVIDER) && 'app source not checked out' }, () => {
+  const src = fsx.readFileSync(APP_PROVIDER, 'utf8')
+  const cloud = new Set([...src.matchAll(/chan:\s*'([A-Za-z]+)'/g)].map((m) => m[1]))
+  const missing = [...cloud].filter((c) => !CHANNELS.includes(c)).sort()
+  assert.deepStrictEqual(missing, [], 'channels the cloud serves that the ring does not — Trends would differ by provider')
+})

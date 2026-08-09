@@ -257,8 +257,12 @@ worth designing properly rather than guessing at, so for now they are simply sep
 ## Local history (offline Trends + track)
 **One source: a live ring**, sampled from the same BoatState that feeds `/ws/telemetry`
 — no database, works on a Victron GX with nothing else installed. `historyAvailable` is
-forced on so the app shows the Trends panel, and the eight channels match what the cloud
-serves, `stw` included.
+forced on so the app shows the Trends panel, and the **nineteen channels match what the
+cloud serves** — wind (true/apparent, speed/angle/direction), SOG/STW/COG/heading, depth,
+VMG, sea and air temperature, port and starboard revs, and the four active-waypoint
+values. So an instrument cell's history flyout shows the same thing whichever provider is
+answering. A channel with no data is simply absent: a boat with no paddlewheel has no
+`stw`, and the waypoint channels appear only while a destination is active.
 
 There is deliberately **no way to point this at a local InfluxDB**. Until v0.15.0 a read
 token did exactly that, and it was a trap: the app only ever asks for a *relative* window
