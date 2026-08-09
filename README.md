@@ -482,8 +482,21 @@ Point your chart app / browser at:
 ```bash
 cd ~/.signalk && npm install sailkick-boat   # or a packed tarball
 ```
-Enable + configure under **Server → Plugin Config → "Sailkick boat companion"**.
-Set **Data directory** to a path on the SSD (or leave blank for the plugin data dir).
+The plugin **enables itself on install** and appears in Signal K's **Webapps** menu as
+**Sailkick** — a launcher with two entries, "Open Sailkick" (full app) and "Open on
+phone" (mobile view). Both point at the mirror on this boat, so nothing has to be typed
+by hand. One npm package can only produce one menu item — Signal K dedupes webapps by
+package name — hence one launcher rather than two entries.
+
+Nothing is uploaded by enabling it. Telemetry sync needs an account write token and
+refuses to start without one; AIS upload and the backfill are off by default; and the
+worldwide base-map seed is skipped entirely on an unpaired boat, so a fresh install
+downloads only what you actually look at. **The whole app works with no account** —
+charts, instruments, trends, AIS, routes and polars are all served from the boat. An
+account adds cloud sync, off-boat access and long-term history.
+
+Set **Data directory** to a path on the SSD (or leave blank for the plugin data dir) —
+that is the one setting worth changing straight away.
 
 ### Victron GX / Venus OS (Cerbo, Ekrano)
 Works on Venus OS Large (Signal K enabled). Point **Data directory** at USB/SD storage

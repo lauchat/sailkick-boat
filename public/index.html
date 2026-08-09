@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sailkick</title>
+<!--
+  Launcher for the Signal K admin menu.
+
+  Signal K mounts <package>/public/ at /<package-name> for any package carrying the
+  `signalk-webapp` keyword, and dedupes the menu by PACKAGE name (interfaces/webapps.js,
+  uniqBy(webapps,'name')) — so one package can only ever produce one entry. Hence one
+  launcher offering both surfaces rather than two menu items.
+
+  The app itself is not served from here: it lives on the plugin's mirror, on a port the
+  owner can change. This page therefore asks the plugin where it is, via the plugin
+  router at /plugins/sailkick-boat/info, and falls back to the default port if that
+  cannot be reached. The host is always taken from the current URL, so this works over
+  whatever address the browser reached Signal K on — LAN IP, .local, or tailnet.
+-->
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --fg:#12161c; --mut:#5c6672; --card:#fff; --line:#e2e6eb; --accent:#0b6ea9 }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#11151a; --fg:#e8edf2; --mut:#96a1ad; --card:#171c23; --line:#252c35; --accent:#4aa8e0 }
+  }
+  * { box-sizing: border-box }
+  body { margin:0; padding:2rem 1rem; background:var(--bg); color:var(--fg);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
+  main { max-width:44rem; margin:0 auto }
+  h1 { margin:0 0 .25rem; font-size:1.5rem; letter-spacing:-.01em }
+  .sub { color:var(--mut); margin:0 0 1.5rem }
+  .grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr)) }
+  a.card { display:block; padding:1.1rem 1.2rem; background:var(--card); border:1px solid var(--line);
+           border-radius:.7rem; text-decoration:none; color:inherit; transition:border-color .15s, transform .15s }
+  a.card:hover { border-color:var(--accent); transform:translateY(-1px) }
+  a.card strong { display:block; font-size:1.05rem; margin-bottom:.2rem }
+  a.card span { color:var(--mut); font-size:.9rem }
+  .note { margin-top:1.5rem; padding:.85rem 1rem; background:var(--card); border:1px solid var(--line);
+          border-radius:.6rem; color:var(--mut); font-size:.9rem }
+  .note b { color:var(--fg); font-weight:600 }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.87em }
+  .warn { border-color:#b4791f }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sailkick</h1>
+  <p class="sub">Charts, instruments and AIS, served from this boat.</p>
+
+  <div class="grid">
+    <a class="card" id="desktop" href="#"><strong>Open Sailkick</strong><span>Full app — chart, trends, weather</span></a>
+    <a class="card" id="mobile"  href="#"><strong>Open on phone</strong><span>Mobile view — swipeable instrument decks</span></a>
+  </div>
+
+  <div class="note" id="note">Locating the mirror…</div>
+</main>
+
+<script>
+(function () {
+  var DEFAULT_PORT = 8080;
+  var note = document.getElementById('note');
+
+  function apply (port, info) {
+    var base = location.protocol + '//' + location.hostname + (port ? ':' + port : '');
+    document.getElementById('desktop').href = base + '/';
+    document.getElementById('mobile').href = base + '/mobile.html';
+
+    if (info && info.running === false) {
+      note.className = 'note warn';
+      note.innerHTML = '<b>The mirror is not running.</b> Enable the plugin in ' +
+        'Server → Plugin Config → Sailkick boat companion, then reload this page.';
+      return;
+    }
+    if (port === 0) {
+      note.className = 'note warn';
+      note.innerHTML = '<b>The mirror port is disabled</b> (set to 0 in the plugin config), ' +
+        'so the app cannot be opened from here. Set a port — 8080 is the default.';
+      return;
+    }
+    var paired = info && info.paired;
+    note.innerHTML = 'Serving on <code>' + base + '</code>. Works with no account and no internet — ' +
+      'live data comes from this boat’s own Signal K, and maps are cached locally.' +
+      (paired ? '' : ' <b>Cloud sync is off</b> until you add a sailkick account in the plugin config; ' +
+                     'nothing leaves the boat before then.');
+  }
+
+  fetch('/plugins/sailkick-boat/info', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null })
+    .then(function (j) {
+      if (j && typeof j.port === 'number') apply(j.port, j);
+      else apply(DEFAULT_PORT, null);
+    })
+    .catch(function () { apply(DEFAULT_PORT, null); });
+})();
+</script>
+</body>
+</html>

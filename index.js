@@ -98,6 +98,8 @@ module.exports = function (app) {
   let ais = null
   let aisTargets = null
   let profile = null
+  let proxyPort = null // what the launcher page needs to build its links
+  let pairedSlug = null
   let statusTimer = null
   let accountStatus = null
   let syncWarning = null
@@ -264,7 +266,7 @@ module.exports = function (app) {
       const pOpts = {
         sailkickUrl: upstream.url,
         storeDir: store,
-        proxyPort: p.proxyPort == null ? 8080 : p.proxyPort,
+        proxyPort: (proxyPort = p.proxyPort == null ? 8080 : p.proxyPort),
         localSignalkUrl: p.localSignalkUrl || 'http://127.0.0.1:3000',
         localPaths: (p.localPaths && p.localPaths.length) ? p.localPaths : PROXY_TUNING.localPaths,
         telemetryPath: p.telemetryPath || PROXY_TUNING.telemetryPath,
@@ -457,6 +459,8 @@ module.exports = function (app) {
     ais = null
     aisTargets = null
     profile = null
+    proxyPort = null
+    pairedSlug = null
     proxy = null
     accountStatus = null
     syncWarning = null
@@ -465,6 +469,19 @@ module.exports = function (app) {
   // Mounted by Signal K at /plugins/sailkick-boat. Handlers dispatch to the live
   // proxy module (created in start), so enable/disable works at request time.
   plugin.registerWithRouter = function (router) {
+    // Read by the launcher page (public/index.html), which Signal K serves at
+    // /sailkick-boat/. That page lives outside this process and cannot know which port
+    // the mirror was configured on, so it asks. `paired` drives the hint about cloud
+    // sync; `running` distinguishes "plugin off" from "mirror port disabled".
+    router.get('/info', (req, res) => {
+      res.json({
+        ok: true,
+        running: !!proxy,
+        port: proxyPort,
+        paired: !!pairedSlug,
+        version: (() => { try { return require('./package.json').version } catch { return null } })()
+      })
+    })
     router.get('/p/*', (req, res) => {
       if (proxy) proxy.handleGet(req, res)
       else res.status(503).send('proxy not enabled')

@@ -1,13 +1,14 @@
 {
   "name": "sailkick-boat",
-  "version": "0.19.0",
-  "description": "Run the sailkick app on board with no internet: charts, weather, climatology, trends and AIS all served from the boat itself. With a sailkick account it also syncs your metrics to the cloud in real time. Alpha, invite-only — info@sailkick.io",
+  "version": "0.20.0",
+  "description": "Run the sailkick app on board with no internet: charts, weather, climatology, trends and AIS all served from the boat itself. With a sailkick account it also syncs your metrics to the cloud in real time. Alpha, invite-only \u2014 info@sailkick.io",
   "main": "index.js",
   "scripts": {
     "test": "node --test"
   },
   "keywords": [
     "signalk-node-server-plugin",
+    "signalk-webapp",
     "signalk",
     "sailkick",
     "influxdb",
@@ -15,6 +16,7 @@
     "cache",
     "proxy"
   ],
+  "signalk-plugin-enabled-by-default": true,
   "author": "lauchat",
   "license": "MIT",
   "repository": {
@@ -35,6 +37,7 @@
   "files": [
     "index.js",
     "lib/",
+    "public/",
     "README.md",
     "LICENSE"
   ]
