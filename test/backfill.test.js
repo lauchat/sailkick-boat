@@ -226,7 +226,7 @@ test('walk: a 4xx write aborts the run rather than skipping data', async () => {
 
 test('walk: stands down while live telemetry has a backlog', async () => {
   const fake = fakeInflux({ srcPointsPerWindow: 1 })
-  let depth = 3
+  let depth = 40 // a real outage backlog, well past cfg.backlogFiles
   const seenPaused = []
   await listen(fake.srv)
   const url = `http://127.0.0.1:${fake.srv.address().port}`
@@ -637,4 +637,61 @@ test('a batch carries up to 50k lines, so a chunk is one or two round trips', ()
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'lib', 'backfill', 'index.js'), 'utf8')
   assert.match(src, /batchSize: 50000/, 'default batch is 50k, not 10k')
   bf.stop()
+})
+
+// --- steady-state live sync must not starve the backfill (v0.21.1) ------------------
+// The stand-down used to require an EMPTY spool. Live sync flushes every second and a
+// file exists for as long as its upload is in flight, so once the cloud round trip grew
+// past the flush interval the spool was never empty — measured on the boat as non-empty
+// in 30 of 30 one-second samples — and the backfill parked for ever, silently, because
+// that path logs nothing. Source InfluxDB CPU sat at 1.6% while 12.8 B points waited.
+test('walk: one upload in flight is NOT a backlog — the backfill keeps working', async () => {
+  const fake = fakeInflux({ srcPointsPerWindow: 1 })
+  await listen(fake.srv)
+  const url = `http://127.0.0.1:${fake.srv.address().port}`
+  let asked = 0
+  const bf = createBackfill(app, {
+    src: { url, org: 'signalk', bucket: 'signalk', token: 'R' },
+    dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    stateFile: tmpFile(),
+    idleMs: 0,
+    backlogWaitMs: 5,
+    // Never empty, never a backlog: exactly the steady state that starved it.
+    pending: async () => { asked++; return { count: 1, bytes: 20000 } }
+  })
+  bf.start()
+  await bf._wait()
+  assert.ok(asked > 0, 'it did check the spool depth')
+  assert.ok(fake.seen.writes > 0, 'and copied windows anyway')
+  assert.doesNotMatch(bf.status(), /paused/, 'never reported itself paused')
+  shut(fake.srv)
+})
+
+test('walk: the backlog threshold is the boundary, not zero', async () => {
+  // 4 files -> work; 5 -> stand down. Pinning both sides stops the threshold drifting
+  // back towards "any activity".
+  for (const [depth, shouldWork] of [[4, true], [5, false]]) {
+    const fake = fakeInflux({ srcPointsPerWindow: 1 })
+    await listen(fake.srv)
+    const url = `http://127.0.0.1:${fake.srv.address().port}`
+    const bf = createBackfill(app, {
+      src: { url, org: 'signalk', bucket: 'signalk', token: 'R' },
+      dst: { url, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+      stateFile: tmpFile(),
+      idleMs: 0,
+      backlogWaitMs: 5,
+      pending: async () => ({ count: depth, bytes: depth * 20000 })
+    })
+    bf.start()
+    if (shouldWork) {
+      await bf._wait()
+      assert.ok(fake.seen.writes > 0, `depth ${depth} must not block`)
+    } else {
+      await new Promise((r) => setTimeout(r, 80))
+      assert.match(bf.status(), /paused/, `depth ${depth} must stand down`)
+      assert.strictEqual(fake.seen.writes, 0, `depth ${depth} must not write`)
+      bf.stop()
+    }
+    shut(fake.srv)
+  }
 })

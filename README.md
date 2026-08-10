@@ -307,8 +307,14 @@ arriving now, and the spool only replays what it captured itself while offline.
 
 Fill the **Copy older history to the cloud** section and save. It walks backwards in
 one-hour windows (newest first, so recent history lands first), resumes after a restart
-from a manifest, and stands aside whenever live telemetry has a backlog — the data-
+from a manifest, and stands aside whenever live telemetry has a **backlog** — the data-
 critical path is never starved by a bulk upload. Progress shows in the status line.
+
+"Backlog" means several files waiting, not merely an upload in flight. Requiring an empty
+spool was a race: live sync flushes every second, so once the round trip to the cloud grew
+past a second the spool was never empty for an instant and the backfill stood down for
+ever — silently, since that path logs nothing. It now yields at a real backlog, which an
+outage produces within a minute, and logs both the stand-down and the resume.
 
 It needs a **cloud read+write token**, not the write token from signup. Every hour it
 uploads is verified by counting the destination, and a write-only token cannot read. A
