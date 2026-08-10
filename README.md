@@ -52,8 +52,13 @@ files to send later — nothing is lost in the gap.
 
 - Network errors, `429` and `5xx` are retried with backoff (1 s → 60 s); the data stays
   on disk.
-- A `4xx` is quarantined to `spool/dead/` rather than retried forever, because a
-  malformed or unauthorised batch would otherwise wedge the queue behind it.
+- A malformed batch (`4xx` other than the three below) is quarantined to `spool/dead/`
+  rather than retried forever, because it would otherwise wedge the queue behind it.
+- **`404`, `401` and `403` are held, not quarantined.** A missing bucket or a rejected
+  token rejects *every* batch identically, so quarantining would pour the whole telemetry
+  stream into `spool/dead/` while the plugin looked busy. Instead the spool is left
+  intact, the status line names the setting to fix, and retries continue slowly so a
+  correction recovers on its own.
 - The buffer is bounded (500 MB). On overflow the **oldest** files are dropped and
   logged — a long-offline boat fills its own disk otherwise.
 - Timestamps are nanosecond-precise, so replaying after a reconnect overwrites rather
@@ -428,12 +433,24 @@ online boat is never worse off than before.
    is needed — see above). The signup screen shows your boat's ingest credentials.
 2. **Copy the "Write token"** — it is shown **once** and cannot be recovered. If you
    lose it you need a new one minted.
-3. In Plugin Config, fill the **Sailkick account** section — **boat name + write
-   token** — and save.
+3. In Plugin Config, fill the **Sailkick account** section — **write token**, plus
+   either the **boat name** or the **data bucket** — and save.
 
-That is the whole handshake. The plugin resolves everything else locally (`bucket` =
-`<slug>_raw`, `org` = `sailkick`) and never calls the app for configuration, so setup
-works with no internet and there is nothing to re-fetch after a restart.
+That is the whole handshake. The plugin resolves everything else locally (`org` =
+`sailkick`) and never calls the app for configuration, so setup works with no internet
+and there is nothing to re-fetch after a restart.
+
+**Data bucket.** Leave it blank and the bucket is derived as `<boat name>_raw`, which is
+what older accounts use. Newer accounts are identified by a UUID instead — their bucket
+looks like `1fcad258-c422-4e93-a6f9-6811938499f6_raw` — so paste that into **Data
+bucket** and the boat name becomes optional. If your bucket is ever renamed, this is the
+one field to change: the write token survives a rename, because InfluxDB scopes tokens by
+bucket *id* rather than by name.
+
+A bucket that does not exist is treated as a **configuration error, not bad data**:
+telemetry is held on disk, nothing is quarantined, the status line reads
+`sync: HELD — bucket "…" not found`, and it sends itself as soon as the name is
+corrected — no restart needed. The same applies to a rejected token.
 
 > **Upgrading from before 0.14?** Old versions had visible `influxUrl` / `sailkickUrl`
 > fields. Whatever was typed into them is still in your saved config, and since 0.14.4

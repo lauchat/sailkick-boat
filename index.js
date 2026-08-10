@@ -121,8 +121,9 @@ module.exports = function (app) {
         title: 'Sailkick account',
         description: 'Register your boat at www.sailkick.io first — the signup screen shows a write token. Paste it here together with your boat name. Keep that token safe: it is shown only once and cannot be recovered.',
         properties: {
-          slug: { type: 'string', title: 'Boat name', description: 'Exactly as registered on the website.' },
-          writeToken: { type: 'string', title: 'Write token', description: 'From the signup screen ("Write token"). Everything else — Influx URL, organization, bucket — is derived from it and your boat name.' }
+          slug: { type: 'string', title: 'Boat name', description: 'Exactly as registered on the website. Newer accounts are identified by a data bucket instead — if you have one, fill that in below and leave this blank.' },
+          writeToken: { type: 'string', title: 'Write token', description: 'From the signup screen ("Write token"). The Influx URL and organization are fleet-wide and set for you.' },
+          bucket: { type: 'string', title: 'Data bucket', description: 'Leave blank to derive it from the boat name. Set it when your account has an explicit bucket — newer ones are a UUID, e.g. 1fcad258-c422-4e93-a6f9-6811938499f6_raw. Copy it exactly; a bucket that does not exist stops sync rather than losing data, and the status line will say so.' }
         }
       },
       sync: {
@@ -191,7 +192,9 @@ module.exports = function (app) {
       // Purely local: the boat registers on the website, the owner pastes the write
       // token here. Nothing to fetch, so nothing that can fail while offline.
       const r = resolveAccountConfig(app, opts.account)
-      if (r.bundle) accountStatus = `account: ${r.bundle.slug}`
+      // Name the BUCKET, not just the boat: a bucket that no longer exists (a rename, a
+      // typo) is the one misconfiguration that stops sync dead, and it was invisible here.
+      if (r.bundle) accountStatus = `account: ${r.bundle.slug || '(no name)'} -> ${r.bundle.bucket}`
       else if (r.error) accountStatus = `account: ${r.error}`
       else accountStatus = 'account: not configured — register at www.sailkick.io, then paste your write token'
       startModules(opts, r.bundle)

@@ -182,3 +182,50 @@ test('no endpoint configured: the constant is used silently', () => {
   assert.strictEqual(errors.length, 0)
   assert.ok(!/⚠|ignoring/.test(status))
 })
+
+// --- explicit bucket (v0.21.0) ------------------------------------------------------
+// The fleet is moving boat identity from a slug to a UUID, renaming buckets with it —
+// this boat went addiction_raw -> 1fcad258-c422-4e93-a6f9-6811938499f6_raw, keeping the
+// same token because InfluxDB scopes tokens by bucket ID and a rename preserves it.
+// Deriving `${slug}_raw` can therefore no longer be the only option.
+const UUID_BUCKET = '1fcad258-c422-4e93-a6f9-6811938499f6_raw'
+
+test('account: an explicit bucket wins over the derived one', () => {
+  const { app } = tmpApp()
+  const r = resolveAccountConfig(app, { slug: 'addiction', writeToken: 'WTOK', bucket: UUID_BUCKET })
+  assert.strictEqual(r.source, 'config')
+  assert.strictEqual(r.bundle.bucket, UUID_BUCKET, 'not addiction_raw')
+  assert.strictEqual(r.bundle.slug, 'addiction', 'the name is kept for display')
+  assert.strictEqual(r.bundle.writeToken, 'WTOK')
+})
+
+test('account: a bucket alone is enough — newer accounts may have no slug', () => {
+  const { app } = tmpApp()
+  const r = resolveAccountConfig(app, { writeToken: 'WTOK', bucket: UUID_BUCKET })
+  assert.strictEqual(r.source, 'config')
+  assert.strictEqual(r.bundle.bucket, UUID_BUCKET)
+  assert.strictEqual(r.bundle.slug, '', 'no name, and that is fine')
+  assert.ok(accountConfigured(app, { writeToken: 'WTOK', bucket: UUID_BUCKET }))
+})
+
+test('account: a blank bucket still derives from the boat name (no regression)', () => {
+  const { app } = tmpApp()
+  for (const bucket of [undefined, '', '   ']) {
+    const r = resolveAccountConfig(app, { slug: 'addiction', writeToken: 'WTOK', bucket })
+    assert.strictEqual(r.bundle.bucket, 'addiction_raw', `bucket=${JSON.stringify(bucket)}`)
+  }
+})
+
+test('account: the bucket is taken verbatim — never lowercased like the slug', () => {
+  const { app } = tmpApp()
+  const r = resolveAccountConfig(app, { slug: 'MiMi', writeToken: 'WTOK', bucket: 'Boat-UUID_RAW' })
+  assert.strictEqual(r.bundle.slug, 'mimi', 'slug is normalised')
+  assert.strictEqual(r.bundle.bucket, 'Boat-UUID_RAW', 'bucket is not')
+})
+
+test('account: a token with neither name nor bucket is still an actionable error', () => {
+  const { app } = tmpApp()
+  const r = resolveAccountConfig(app, { writeToken: 'WTOK' })
+  assert.strictEqual(r.bundle, null)
+  assert.match(r.error, /bucket/, 'the message mentions the new field')
+})
