@@ -316,6 +316,15 @@ past a second the spool was never empty for an instant and the backfill stood do
 ever — silently, since that path logs nothing. It now yields at a real backlog, which an
 outage produces within a minute, and logs both the stand-down and the resume.
 
+**It restarts itself.** A run stops after a streak of failed writes, so a boat that has
+gone offline never marks a window falsely done — but it then schedules a fresh walk (1 min,
+backing off to 30 min, reset by any successful window) instead of waiting for a human. It
+used to end with "resumes on restart", and nothing restarted it: one boat sat idle for 8.6
+hours at 96% complete after seven link drops in 13 minutes, while live sync rode out the
+same drops with a single retry. A rejected destination (a renamed bucket, a bad token) is
+retried the same way, since those are settings and settings get corrected. Genuinely
+malformed data still stops for good — retrying cannot fix it.
+
 It needs a **cloud read+write token**, not the write token from signup. Every hour it
 uploads is verified by counting the destination, and a write-only token cannot read. A
 `204` means InfluxDB accepted the bytes, not that every point landed — without the count

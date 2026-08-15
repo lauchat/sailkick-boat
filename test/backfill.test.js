@@ -116,8 +116,10 @@ function fakeInflux ({ srcPointsPerWindow = 2, dstShortfall = 0, writeStatus = 2
         seen.writes++
         const body = req.headers['content-encoding'] === 'gzip' ? zlib.gunzipSync(raw).toString() : raw.toString()
         seen.lines += body.trim().split('\n').filter(Boolean).length
-        res.statusCode = writeStatus
-        res.end(writeStatus === 204 ? undefined : '{"message":"nope"}')
+        // writeStatus may be a function, so a test can make writes fail and then recover
+        const st = typeof writeStatus === 'function' ? writeStatus(seen.writes) : writeStatus
+        res.statusCode = st
+        res.end(st === 204 ? undefined : '{"message":"nope"}')
         return
       }
       seen.queries++
@@ -215,12 +217,17 @@ test('walk: an unreachable source is never mistaken for an empty window', async 
   assert.match(bf.status(), /unreachable/)
 })
 
-test('walk: a 4xx write aborts the run rather than skipping data', async () => {
+test('walk: a rejected write aborts the run rather than skipping data', async () => {
+  // 401 is a SETTING (since v0.21.2) — the run stops and waits rather than dying for
+  // good, because a token gets corrected. What must never change is that a rejected
+  // write marks nothing done: skipping it would leave a hole nothing ever revisits.
   const fake = fakeInflux({ srcPointsPerWindow: 2, writeStatus: 401 })
   const { bf, stateFile } = await runBackfill(fake)
   const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
-  assert.strictEqual(Object.keys(st.done).length, 0)
-  assert.match(bf.status(), /write rejected/i)
+  assert.strictEqual(Object.keys(st.done).length, 0, 'no window marked done')
+  assert.match(bf.status(), /rejected the write/i)
+  assert.match(bf.status(), /retry in/, 'a bad token is fixable, so it comes back')
+  bf.stop()
   shut(fake.srv)
 })
 
@@ -694,4 +701,95 @@ test('walk: the backlog threshold is the boundary, not zero', async () => {
     }
     shut(fake.srv)
   }
+})
+
+// --- a transient stop must not be permanent (v0.21.2) -------------------------------
+// A streak of failed writes ended the run with "it resumes on restart" — but nothing
+// restarts it. On the boat, seven Starlink drops in 13 minutes tripped the streak and the
+// backfill sat idle for 8.6 hours at 96% complete. Live sync rode out the same drops with
+// a single retry, so the link plainly recovers on its own.
+//
+// The fixture holds ~1 window (HOURS_OF_HISTORY = 3, ceiling == earliest), so
+// maxErrorStreak is 1 here: one failed write is a full streak.
+const settle = (ms) => new Promise((r) => setTimeout(r, ms))
+const doneCount = (f) => { try { return Object.keys(JSON.parse(fs.readFileSync(f, 'utf8')).done || {}).length } catch { return 0 } }
+async function waitForDone (f, ms = 3000) {
+  for (let i = 0; i < ms / 25 && doneCount(f) === 0; i++) await settle(25)
+  return doneCount(f)
+}
+
+test('walk: recovers by itself after a streak of failed writes', async (t) => {
+  let failing = true
+  const fake = fakeInflux({ srcPointsPerWindow: 2, writeStatus: () => (failing ? 500 : 204) })
+  await listen(fake.srv)
+  const stateFile = tmpFile()
+  const bf = createBackfill(app, {
+    src: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'signalk', bucket: 'signalk', token: 'R' },
+    dst: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    stateFile, idleMs: 0, maxErrorStreak: 1, retryRunMinMs: 30, retryRunMaxMs: 60
+  })
+  // must run even if an assertion fails, or the retry loop keeps the runner alive
+  t.after(() => { bf.stop(); shut(fake.srv) })
+  bf.start()
+  await bf._wait()
+  assert.match(bf.status(), /paused after repeated errors/, 'the run gave up, as before')
+  assert.match(bf.status(), /retry in/, 'but announced a retry — this is the fix')
+  assert.strictEqual(doneCount(stateFile), 0, 'nothing marked done while failing')
+
+  failing = false // the link comes back, exactly as Starlink does
+  assert.ok(await waitForDone(stateFile) > 0, 'it restarted itself, with no human intervention')
+  assert.doesNotMatch(bf.status(), /paused after repeated errors/, 'and the status recovered')
+})
+
+test('walk: stop() cancels a pending retry', async (t) => {
+  const fake = fakeInflux({ srcPointsPerWindow: 2, writeStatus: () => 500 })
+  await listen(fake.srv)
+  const bf = createBackfill(app, {
+    src: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'signalk', bucket: 'signalk', token: 'R' },
+    dst: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    stateFile: tmpFile(), idleMs: 0, maxErrorStreak: 1, retryRunMinMs: 25, retryRunMaxMs: 25
+  })
+  t.after(() => { bf.stop(); shut(fake.srv) })
+  bf.start()
+  await bf._wait()
+  bf.stop()
+  const after = fake.seen.writes
+  await settle(150) // several retry periods
+  assert.strictEqual(fake.seen.writes, after, 'a stopped module stays stopped')
+})
+
+test('walk: a rejected destination (404) is retried, not treated as bad data', async (t) => {
+  // The bucket-rename case. 404 says "your settings are wrong", and settings get fixed —
+  // so the run must come back, unlike a genuinely malformed batch.
+  let wrongBucket = true
+  const fake = fakeInflux({ srcPointsPerWindow: 2, writeStatus: () => (wrongBucket ? 404 : 204) })
+  await listen(fake.srv)
+  const stateFile = tmpFile()
+  const bf = createBackfill(app, {
+    src: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'signalk', bucket: 'signalk', token: 'R' },
+    dst: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    stateFile, idleMs: 0, retryRunMinMs: 30, retryRunMaxMs: 60
+  })
+  t.after(() => { bf.stop(); shut(fake.srv) })
+  bf.start()
+  await bf._wait()
+  assert.match(bf.status(), /retry in/, 'a 404 schedules a retry')
+
+  wrongBucket = false // the owner pastes the right bucket
+  assert.ok(await waitForDone(stateFile) > 0, 'and it resumes once corrected')
+})
+
+test('walk: a malformed batch (422) is terminal — retrying cannot fix bad data', async (t) => {
+  const fake = fakeInflux({ srcPointsPerWindow: 2, writeStatus: () => 422 })
+  await listen(fake.srv)
+  const bf = createBackfill(app, {
+    src: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'signalk', bucket: 'signalk', token: 'R' },
+    dst: { url: `http://127.0.0.1:${fake.srv.address().port}`, org: 'sailkick', bucket: 'addiction_raw', token: 'RW' },
+    stateFile: tmpFile(), idleMs: 0, retryRunMinMs: 25, retryRunMaxMs: 25
+  })
+  t.after(() => { bf.stop(); shut(fake.srv) })
+  bf.start()
+  await bf._wait()
+  assert.match(bf.status(), /write rejected/, 'stopped, as it should be')
+  assert.doesNotMatch(bf.status(), /retry in/, 'and NOT rescheduled — that would loop for ever')
 })
