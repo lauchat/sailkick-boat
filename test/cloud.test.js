@@ -259,3 +259,74 @@ test('sync page: is served, reads BOTH sides through the auth-protected plugin r
   const pkg = require('../package.json')
   assert.ok(pkg.files.includes('public/'), 'ships in the tarball')
 })
+
+// --- the "Signing in… forever" bug (v0.22.1) ----------------------------------------
+// Signal K mounts plugin routers AFTER its own bodyParser.json() (signalk-server
+// dist/index.js:77). By the time a handler runs, the body is parsed onto req.body and the
+// request stream is SPENT — so waiting for 'data'/'end' waits for events that will never
+// fire. No error, no timeout: the request simply hangs, which is exactly what the Sync
+// page did on sign-in. The mirror has no body parser, so both shapes must work.
+const express = (() => { try { return require('express') } catch { return null } })()
+
+test('a pre-parsed body (Signal K router) does not hang', { skip: !express && 'express not installed' }, async () => {
+  const f = fakeCloud(); await listen(f.srv)
+  const cloud = createCloud(app, { upstream: `http://127.0.0.1:${f.srv.address().port}`, dataDir: tmpDir() })
+  cloud.start()
+
+  const a = express()
+  a.use(express.json()) // exactly what Signal K does before plugin routers
+  a.all('/cloud/*', (req, res) => cloud.handle(String(req.params[0] || ''), req, res))
+  const h = a.listen(0)
+  await new Promise((r) => h.once('listening', r))
+  const base = `http://127.0.0.1:${h.address().port}`
+
+  // Before the fix this promise never settled.
+  const r = await Promise.race([
+    fetch(`${base}/cloud/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug: 'addiction', password: 'right' })
+    }).then(async (x) => ({ status: x.status, body: await x.json() })),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('HUNG — the request never completed')), 4000))
+  ])
+  assert.strictEqual(r.status, 200)
+  assert.strictEqual(r.body.loggedIn, true)
+  assert.strictEqual(cloud.status().slug, 'addiction')
+
+  h.closeAllConnections && h.closeAllConnections()
+  await new Promise((r) => h.close(r))
+  await shut(f.srv)
+})
+
+test('the boat profile survives a pre-parsed body too', { skip: !express && 'express not installed' }, async () => {
+  // Same trap: POST /profile/polars from the Sync page goes through the same router.
+  const { createProfile } = require('../lib/profile')
+  const dir = tmpDir()
+  const profile = createProfile(app, { dataDir: dir })
+  const a = express()
+  a.use(express.json())
+  a.all('/profile*', (req, res) => {
+    const rest = String(req.params[0] || '')
+    const qs = req.url.indexOf('?')
+    const url = '/api/profile' + rest + (qs >= 0 ? req.url.slice(qs) : '')
+    profile.handle(new Proxy(req, { get: (t, k) => (k === 'url' ? url : t[k]) }), res)
+  })
+  const h = a.listen(0)
+  await new Promise((r) => h.once('listening', r))
+  const base = `http://127.0.0.1:${h.address().port}`
+
+  const made = await Promise.race([
+    fetch(`${base}/profile/polars`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Addiction', csv: 'twa,6' })
+    }).then(async (x) => ({ status: x.status, body: await x.json() })),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('HUNG')), 4000))
+  ])
+  assert.strictEqual(made.status, 201)
+  assert.strictEqual(made.body.item.name, 'Addiction')
+
+  const listed = await (await fetch(`${base}/profile/polars`)).json()
+  assert.strictEqual(listed.polars.length, 1, 'and it really persisted')
+
+  h.closeAllConnections && h.closeAllConnections()
+  await new Promise((r) => h.close(r))
+})
