@@ -330,3 +330,57 @@ test('the boat profile survives a pre-parsed body too', { skip: !express && 'exp
   h.closeAllConnections && h.closeAllConnections()
   await new Promise((r) => h.close(r))
 })
+
+// --- transient link drops (v0.22.2) -------------------------------------------------
+// The boat reported "cannot reach https://www.sailkick.io (fetch failed)". The container
+// could reach the cloud perfectly — 0/10 probe failures, ~180 ms each — so the failure
+// was a real but momentary Starlink drop at exactly the wrong second. Two faults: the
+// message hid the cause (Node reports every transport failure as "fetch failed" and
+// buries the reason in e.cause), and one blip dead-ended a button while live sync
+// recovers from the same drops after a single retry.
+test('cloud: a transient drop is retried, and a lasting one names the cause', async () => {
+  let attempts = 0
+  const flaky = http.createServer((req, res) => {
+    attempts++
+    if (attempts < 3) { req.destroy(); return } // two drops, then the link returns
+    res.setHeader('Set-Cookie', `${COOKIE}; Max-Age=2592000`)
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ ok: true, boat: { slug: 'addiction' } }))
+  })
+  await listen(flaky)
+  const cloud = createCloud(app, { upstream: `http://127.0.0.1:${flaky.address().port}`, dataDir: tmpDir() })
+  cloud.start()
+  const r = await cloud.login('addiction', 'right')
+  assert.strictEqual(r.ok, true, 'rode out two drops instead of dead-ending')
+  assert.strictEqual(attempts, 3)
+  assert.strictEqual(cloud.status().loggedIn, true)
+  await shut(flaky)
+
+  // A host that is genuinely gone must still fail — with the REASON, not "fetch failed".
+  // Bind then release a port so it is certainly closed (port 1 is rejected as "bad port"
+  // before a connection is even attempted, which tests nothing).
+  const probe = http.createServer(); await listen(probe)
+  const deadPort = probe.address().port
+  await shut(probe)
+  const dead = createCloud(app, { upstream: `http://127.0.0.1:${deadPort}`, dataDir: tmpDir(), timeoutMs: 300 })
+  dead.start()
+  const bad = await dead.login('addiction', 'right')
+  assert.strictEqual(bad.ok, false)
+  assert.strictEqual(bad.code, 'offline')
+  assert.match(bad.message, /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|aborted|timeout/i, 'names the actual cause')
+  assert.match(bad.message, /try again/, 'and tells the user what to do')
+})
+
+test('cloud: an HTTP status is never retried — a wrong password stays wrong', async () => {
+  // Retrying must be limited to transport failures. Hammering a 401 three times would
+  // slow every typo and could trip rate limiting.
+  let hits = 0
+  const srv = http.createServer((req, res) => { hits++; res.statusCode = 401; res.end('{"ok":false}') })
+  await listen(srv)
+  const cloud = createCloud(app, { upstream: `http://127.0.0.1:${srv.address().port}`, dataDir: tmpDir() })
+  cloud.start()
+  const r = await cloud.login('addiction', 'wrong')
+  assert.strictEqual(r.code, 'bad-credentials')
+  assert.strictEqual(hits, 1, 'asked exactly once')
+  await shut(srv)
+})
