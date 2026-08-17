@@ -266,9 +266,17 @@ module.exports = function (app) {
       if (upstream.ignored) {
         ;(app.error || console.error)(`[sailkick-boat] ignoring proxy.sailkickUrl "${upstream.ignored}" left over from an older config — mirroring ${upstream.url}. Set proxy.selfHosted:true to keep your own server.`)
       }
+      // Boat identity for the app, derived — never guessed. The cloud only fills
+      // config.boat for a logged-in session and the mirror forwards no cookie, so the app
+      // ran with no identity and public/engine/polar-cloud.js could not find its data
+      // cloud (it keys on boat.perfKey). The app server defaults `bucket` and `perfKey`
+      // from the same identity (server/auth/registry.js), so the bucket minus its _raw
+      // suffix IS the perf key — for a UUID account and a grandfathered slug one alike.
+      const perfKey = b && b.bucket ? String(b.bucket).replace(/_raw$/, '') : null
       const pOpts = {
         sailkickUrl: upstream.url,
         storeDir: store,
+        boat: perfKey ? { perfKey, slug: (b && b.slug) || perfKey } : null,
         proxyPort: (proxyPort = p.proxyPort == null ? 8080 : p.proxyPort),
         localSignalkUrl: p.localSignalkUrl || 'http://127.0.0.1:3000',
         localPaths: (p.localPaths && p.localPaths.length) ? p.localPaths : PROXY_TUNING.localPaths,

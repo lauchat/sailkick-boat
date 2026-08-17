@@ -160,3 +160,58 @@ test('packaging: declares the webapp keyword, enable-by-default, and ships publi
   assert.ok(pkg.keywords.some((k) => k.startsWith('signalk-category-')), 'categorised in the app store')
   assert.match(html, /icon\.png/, 'the launcher shows it too')
 })
+
+// --- boat identity for the app (v0.21.3) --------------------------------------------
+// The cloud fills config.boat only for a logged-in session, and the mirror forwards no
+// cookie — so it always arrived null. Harmless for most of the UI, but
+// public/engine/polar-cloud.js keys the performance data cloud on boat.perfKey and
+// throws 'no boat identity' without it. On the boat the polar cloud was simply missing
+// while its bake sat cached and reachable: /perf/<uuid>/estimate.json returned 200 with
+// 2.5 MB. perfKey is DERIVED, not guessed — server/auth/registry.js defaults `bucket`
+// and `perfKey` from the same identity, so bucket minus _raw is the key.
+const UUID = '1fcad258-c422-4e93-a6f9-6811938499f6'
+
+test('serveConfig: fills in boat identity so the polar data cloud can load', async () => {
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const proxy = createProxy(app, {
+    sailkickUrl: `http://127.0.0.1:${up.address().port}`,
+    proxyPort: 0,
+    storeDir: tmp(),
+    manifest: { enabled: false },
+    seed: { enabled: false },
+    boat: { perfKey: UUID, slug: 'addiction' }
+  })
+  proxy.start()
+  const j = JSON.parse((await callConfig(proxy)).body)
+  assert.ok(j.boat, 'boat is no longer null')
+  assert.strictEqual(j.boat.perfKey, UUID, 'the key the polar cloud fetches /perf/<key>/ with')
+  assert.strictEqual(j.boat.slug, 'addiction')
+  assert.strictEqual(j.boat.readOnly, false, 'the owner is never a read-only visitor')
+  assert.strictEqual(j.auth.required, false, 'and the login gate is still disabled')
+  proxy.stop(); up.close()
+})
+
+test('serveConfig: an unpaired boat leaves config.boat exactly as the cloud sent it', async () => {
+  // No account -> no bucket -> no perfKey. Inventing one would point the app at a
+  // /perf directory that does not exist, which is worse than no cloud at all.
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const proxy = createProxy(app, {
+    sailkickUrl: `http://127.0.0.1:${up.address().port}`,
+    proxyPort: 0, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false }
+  })
+  proxy.start()
+  const j = JSON.parse((await callConfig(proxy)).body)
+  assert.strictEqual(j.boat, null, 'untouched')
+  assert.strictEqual(j.auth.required, false, 'the rest of the rewrite still applies')
+  proxy.stop(); up.close()
+})
+
+test('perfKey is the bucket minus its _raw suffix, for UUID and legacy slug alike', () => {
+  // The derivation the plugin entry performs. Pinning it here because it is the whole
+  // reason no new config field was needed.
+  const derive = (bucket) => (bucket ? String(bucket).replace(/_raw$/, '') : null)
+  assert.strictEqual(derive(`${UUID}_raw`), UUID, 'UUID account')
+  assert.strictEqual(derive('addiction_raw'), 'addiction', 'grandfathered slug account')
+  assert.strictEqual(derive(''), null, 'unpaired')
+  assert.strictEqual(derive('weird_raw_raw'), 'weird_raw', 'only the trailing suffix goes')
+})

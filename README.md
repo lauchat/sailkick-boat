@@ -242,6 +242,15 @@ so the boat's own app opens with no password, fully offline. Everything else in 
 config passes through untouched. (Hand-edit `proxy.openAccess: false` to keep the cloud
 login gate — there is no toggle, since the gate cannot complete over the mirror anyway.)
 
+It also fills in **`boat.perfKey`**, which the cloud only sends to a logged-in session.
+Without it the app has no identity and the **performance data cloud** — the recorded
+(TWA, STW) samples behind the polar plot, baked to `/perf/<perfKey>/estimate.json` — never
+loads, even though the bake itself is cached and reachable. The key is derived rather than
+configured: the app server takes a boat's Influx bucket and its perf directory from the
+same identity, so the bucket minus its `_raw` suffix *is* the perf key, for a UUID account
+and a grandfathered slug one alike. An unpaired boat has no bucket, so `boat` is left
+exactly as the cloud sent it.
+
 ## Routes, polars and settings — stored on the boat
 The app reads and writes these through `/api/profile/*`. On the cloud that router is
 session-gated, and the mirror can never satisfy it: the caching GET path forwards no
