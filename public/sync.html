@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sailkick · Sync</title>
+<!--
+  Copy polars and routes between this boat and the cloud account.
+
+  Both sides are read through the PLUGIN ROUTER (/plugins/sailkick-boat/...), never the
+  mirror on :8080 — that router is behind Signal K's own security, and it keeps this page
+  same-origin with both sides so no CORS is involved.
+
+  Items are matched by NAME, not id: ids are assigned independently on each side, so the
+  same polar has two different ids. Nothing is ever overwritten without a second, explicit
+  click, and nothing is deleted at all.
+-->
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --fg:#12161c; --mut:#5c6672; --card:#fff; --line:#e2e6eb;
+          --accent:#0b6ea9; --ok:#1d7a4c; --warn:#b4791f; --err:#b4453a }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#11151a; --fg:#e8edf2; --mut:#96a1ad; --card:#171c23; --line:#252c35;
+            --accent:#4aa8e0; --ok:#4cc38a; --warn:#d9a441; --err:#e0736a }
+  }
+  * { box-sizing: border-box }
+  body { margin:0; padding:1.5rem 1rem 3rem; background:var(--bg); color:var(--fg);
+         font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
+  main { max-width:60rem; margin:0 auto }
+  h1 { margin:0 0 .2rem; font-size:1.4rem; display:flex; align-items:center; gap:.5rem }
+  h1 img { border-radius:.35rem }
+  h2 { font-size:1rem; margin:1.6rem 0 .5rem; color:var(--mut); font-weight:600;
+       text-transform:uppercase; letter-spacing:.04em }
+  .sub { color:var(--mut); margin:0 0 1.2rem }
+  .bar { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; padding:.8rem 1rem; background:var(--card);
+         border:1px solid var(--line); border-radius:.6rem; margin-bottom:1rem }
+  .bar .grow { flex:1 1 auto }
+  input { padding:.45rem .6rem; border:1px solid var(--line); border-radius:.4rem;
+          background:var(--bg); color:var(--fg); font:inherit; min-width:9rem }
+  button { padding:.45rem .8rem; border:1px solid var(--line); border-radius:.4rem; background:var(--card);
+           color:inherit; font:inherit; cursor:pointer }
+  button:hover:not(:disabled) { border-color:var(--accent) }
+  button:disabled { opacity:.4; cursor:default }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+          border:1px solid var(--line); border-radius:.6rem; overflow:hidden }
+  th, td { padding:.55rem .7rem; text-align:left; border-bottom:1px solid var(--line); vertical-align:middle }
+  th { font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; color:var(--mut) }
+  tr:last-child td { border-bottom:none }
+  td.act { text-align:right; white-space:nowrap }
+  .tag { font-size:.75rem; padding:.1rem .45rem; border-radius:.3rem; border:1px solid var(--line); color:var(--mut) }
+  .tag.ok { color:var(--ok); border-color:var(--ok) }
+  .tag.diff { color:var(--warn); border-color:var(--warn) }
+  .tag.only { color:var(--accent); border-color:var(--accent) }
+  .msg { padding:.7rem 1rem; border-radius:.5rem; border:1px solid var(--line); background:var(--card); margin:.8rem 0 }
+  .msg.err { border-color:var(--err); color:var(--err) }
+  .msg.ok { border-color:var(--ok) }
+  .empty { color:var(--mut); padding:.8rem .7rem }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em }
+</style>
+</head>
+<body>
+<main>
+  <h1><img src="icon.png" alt="" width="26" height="26">Sync polars &amp; routes</h1>
+  <p class="sub">Copy between this boat and your sailkick cloud account. Nothing is deleted, and nothing is
+     overwritten without asking.</p>
+
+  <div class="bar" id="authbar"><span class="grow">Checking the cloud session…</span></div>
+  <div id="msg"></div>
+
+  <h2>Polars</h2>
+  <div id="polars"></div>
+  <h2>Routes</h2>
+  <div id="routes"></div>
+</main>
+
+<script>
+(function () {
+  var API = '/plugins/sailkick-boat';
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
+  var state = { loggedIn: false, boat: {}, cloud: {} };
+
+  function say (text, kind) {
+    $('msg').innerHTML = text ? '<div class="msg ' + (kind || '') + '">' + esc(text) + '</div>' : '';
+  }
+
+  function j (path, opts) {
+    return fetch(API + path, Object.assign({ credentials: 'same-origin' }, opts || {}))
+      .then(function (r) { return r.json().catch(function () { return {}; })
+        .then(function (b) { return { status: r.status, body: b }; }); });
+  }
+
+  // ---- identity ---------------------------------------------------------------
+  // Ids are per-side, so a polar present in both has two different ones. Name is the
+  // only stable handle across the boundary.
+  function key (item) { return String(item && item.name || '').trim().toLowerCase(); }
+
+  // Same name — same thing? Compare what the user actually authored, not the wrapper:
+  // the CSV for a polar, the geometry for a route. updatedAt and id always differ.
+  function same (a, b, section) {
+    if (section === 'polars') return String(a.csv || '') === String(b.csv || '');
+    return JSON.stringify(a.path || null) === JSON.stringify(b.path || null) &&
+           JSON.stringify(a.destination || null) === JSON.stringify(b.destination || null);
+  }
+
+  function rows (section) {
+    var boat = state.boat[section] || [], cloud = state.cloud[section] || [];
+    var names = {}, out = [];
+    boat.forEach(function (i) { names[key(i)] = { name: i.name, boat: i }; });
+    cloud.forEach(function (i) { (names[key(i)] = names[key(i)] || { name: i.name }).cloud = i; });
+    Object.keys(names).sort().forEach(function (k) { out.push(names[k]); });
+    return out;
+  }
+
+  function render (section, el) {
+    var list = rows(section);
+    if (!list.length) {
+      el.innerHTML = '<div class="msg"><span class="empty">Nothing on either side yet.</span></div>';
+      return;
+    }
+    var html = '<table><tr><th>Name</th><th>On the boat</th><th>In the cloud</th><th></th></tr>';
+    list.forEach(function (r, i) {
+      var tag, act = '';
+      if (r.boat && r.cloud) {
+        var eq = same(r.boat, r.cloud, section);
+        tag = eq ? '<span class="tag ok">in sync</span>' : '<span class="tag diff">differs</span>';
+        if (!eq) {
+          act = '<button data-a="pull" data-s="' + section + '" data-i="' + i + '">⤓ cloud → boat</button> ' +
+                '<button data-a="push" data-s="' + section + '" data-i="' + i + '">⤒ boat → cloud</button>';
+        }
+      } else if (r.cloud) {
+        tag = '<span class="tag only">cloud only</span>';
+        act = '<button class="primary" data-a="pull" data-s="' + section + '" data-i="' + i + '">⤓ copy to boat</button>';
+      } else {
+        tag = '<span class="tag only">boat only</span>';
+        act = '<button data-a="push" data-s="' + section + '" data-i="' + i + '">⤒ copy to cloud</button>';
+      }
+      html += '<tr><td>' + esc(r.name) + ' ' + tag + '</td>' +
+              '<td>' + (r.boat ? '✓' : '—') + '</td>' +
+              '<td>' + (r.cloud ? '✓' : '—') + '</td>' +
+              '<td class="act">' + (state.loggedIn ? act : '') + '</td></tr>';
+    });
+    el.innerHTML = html + '</table>';
+    el.querySelectorAll('button[data-a]').forEach(function (b) {
+      b.addEventListener('click', function () { copy(b.dataset.a, b.dataset.s, Number(b.dataset.i), b); });
+    });
+  }
+
+  // ---- copy one item ----------------------------------------------------------
+  function copy (dir, section, idx, btn) {
+    var r = rows(section)[idx];
+    var from = dir === 'pull' ? r.cloud : r.boat;
+    var onto = dir === 'pull' ? r.boat : r.cloud;
+    if (!from) return;
+    if (onto && !confirm('"' + r.name + '" already exists on the ' + (dir === 'pull' ? 'boat' : 'cloud') +
+                         ' and differs.\n\nOverwrite it with the ' + (dir === 'pull' ? 'cloud' : 'boat') + ' copy?')) return;
+
+    // Carry only the authored fields — never the source id or updatedAt, which belong to
+    // the side they came from.
+    var body = {};
+    Object.keys(from).forEach(function (k) { if (k !== 'id' && k !== 'updatedAt') body[k] = from[k]; });
+
+    var base = dir === 'pull' ? '/profile/' + section : '/cloud/profile/' + section;
+    var path = onto ? base + '/' + encodeURIComponent(onto.id) : base;
+    btn.disabled = true;
+    say('Copying "' + r.name + '"…');
+    j(path, { method: onto ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (res) {
+        if (res.status >= 200 && res.status < 300) { say('Copied "' + r.name + '".', 'ok'); return load(); }
+        say('Could not copy "' + r.name + '": ' + (res.body.message || 'HTTP ' + res.status), 'err');
+        btn.disabled = false;
+      })
+      .catch(function (e) { say('Could not copy: ' + e.message, 'err'); btn.disabled = false; });
+  }
+
+  // ---- load both sides --------------------------------------------------------
+  function load () {
+    return j('/cloud/status').then(function (s) {
+      state.loggedIn = !!(s.body && s.body.loggedIn);
+      authbar(s.body || {});
+      // Both sides use the same section endpoints, so the response shape is identical:
+      // { ok, polars: [...] } / { ok, routes: [...] }.
+      var want = [j('/profile/polars'), j('/profile/routes')];
+      if (state.loggedIn) want.push(j('/cloud/profile/polars'), j('/cloud/profile/routes'));
+      return Promise.all(want).then(function (r) {
+        state.boat.polars = (r[0].body && r[0].body.polars) || [];
+        state.boat.routes = (r[1].body && r[1].body.routes) || [];
+        state.cloud.polars = state.loggedIn ? ((r[2].body && r[2].body.polars) || []) : [];
+        state.cloud.routes = state.loggedIn ? ((r[3].body && r[3].body.routes) || []) : [];
+        if (state.loggedIn && r[2].status === 401) { state.loggedIn = false; authbar({ loggedIn: false }); }
+        render('polars', $('polars'));
+        render('routes', $('routes'));
+      });
+    }).catch(function (e) { say('Cannot reach the plugin: ' + e.message, 'err'); });
+  }
+
+  function authbar (s) {
+    var bar = $('authbar');
+    if (s.loggedIn) {
+      bar.innerHTML = '<span class="grow">Signed in to the cloud as <b>' + esc(s.slug) + '</b>' +
+        (s.expiresInDays != null ? ' · session expires in ' + s.expiresInDays + ' days' : '') + '</span>' +
+        '<button id="out">Sign out</button>';
+      $('out').addEventListener('click', function () {
+        j('/cloud/logout', { method: 'POST' }).then(function () { say(''); load(); });
+      });
+    } else {
+      bar.innerHTML = '<span class="grow">Sign in to your sailkick account to see the cloud side.</span>' +
+        '<input id="slug" placeholder="boat name" autocomplete="username">' +
+        '<input id="pw" type="password" placeholder="password" autocomplete="current-password">' +
+        '<button class="primary" id="in">Sign in</button>';
+      var go = function () {
+        var slug = $('slug').value.trim(), pw = $('pw').value;
+        if (!slug || !pw) return;
+        $('in').disabled = true; say('Signing in…');
+        j('/cloud/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ slug: slug, password: pw }) })
+          .then(function (res) {
+            if (res.body && res.body.loggedIn) { say('Signed in. Your password is not stored — only the session.', 'ok'); return load(); }
+            say((res.body && res.body.message) || 'Sign in failed', 'err');
+            $('in').disabled = false;
+          })
+          .catch(function (e) { say('Sign in failed: ' + e.message, 'err'); $('in').disabled = false; });
+      };
+      $('in').addEventListener('click', go);
+      $('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+    }
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

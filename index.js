@@ -10,6 +10,7 @@ const { createBackfill } = require('./lib/backfill')
 const { createAis } = require('./lib/ais')
 const { createAisTargets } = require('./lib/ais/targets')
 const { createProfile } = require('./lib/profile')
+const { createCloud } = require('./lib/cloud')
 const { resolveAccountConfig } = require('./lib/account')
 
 // sailkick-boat: one Signal K plugin, two independently-toggleable modules —
@@ -98,6 +99,7 @@ module.exports = function (app) {
   let ais = null
   let aisTargets = null
   let profile = null
+  let cloud = null
   let proxyPort = null // what the launcher page needs to build its links
   let pairedSlug = null
   let statusTimer = null
@@ -334,6 +336,16 @@ module.exports = function (app) {
         profile = null
       }
 
+      // Cloud account session, for copying polars and routes between the boat and the
+      // cloud copy (the Sync page). Cookie only — see lib/cloud/index.js.
+      try {
+        cloud = createCloud(app, { upstream: SAILKICK_APP_URL, timeoutMs: PROXY_TUNING.requestTimeoutMs })
+        cloud.start()
+      } catch (e) {
+        (app.error || console.error)('[sailkick-boat] cloud session start failed: ' + e.message)
+        cloud = null
+      }
+
       if (p.serveTelemetry !== false) {
         try {
           telemetry = createTelemetry(app, {})
@@ -460,6 +472,7 @@ module.exports = function (app) {
     try { if (history) history.stop() } catch {}
     try { if (aisTargets) aisTargets.stop() } catch {}
     try { if (profile) profile.stop() } catch {}
+    try { if (cloud) cloud.stop() } catch {}
     try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
@@ -470,6 +483,7 @@ module.exports = function (app) {
     ais = null
     aisTargets = null
     profile = null
+    cloud = null
     proxyPort = null
     pairedSlug = null
     proxy = null
@@ -492,6 +506,27 @@ module.exports = function (app) {
         paired: !!pairedSlug,
         version: (() => { try { return require('./package.json').version } catch { return null } })()
       })
+    })
+    // Cloud account endpoints for the Sync page. Deliberately HERE and not on the mirror:
+    // the plugin router sits behind Signal K's own security (this path answers 401
+    // unauthenticated, the mirror answers 200), so the cloud session is no more exposed
+    // than the admin UI. On :8080 it would be handed to anyone on the boat's wifi.
+    router.all('/cloud/*', (req, res) => {
+      if (!cloud) { res.status(503).json({ ok: false, code: 'off', message: 'plugin not enabled' }); return }
+      cloud.handle(String(req.params[0] || ''), req, res)
+    })
+    // The boat's OWN profile, mirrored onto this router so the Sync page can read both
+    // sides same-origin. It is already served on the mirror for the app itself, but the
+    // page is served from Signal K on :3000 and a cross-port fetch would need CORS.
+    router.all('/profile*', (req, res) => {
+      if (!profile) { res.status(503).json({ ok: false, code: 'off', message: 'plugin not enabled' }); return }
+      const rest = String(req.params[0] || '')
+      // profile.handle() parses an /api/profile/... url; give it one — query string
+      // included, or ?section= would be silently dropped and return the whole profile.
+      const qs = req.url.indexOf('?')
+      const url = '/api/profile' + rest + (qs >= 0 ? req.url.slice(qs) : '')
+      const shim = new Proxy(req, { get: (t, k) => (k === 'url' ? url : t[k]) })
+      profile.handle(shim, res)
     })
     router.get('/p/*', (req, res) => {
       if (proxy) proxy.handleGet(req, res)

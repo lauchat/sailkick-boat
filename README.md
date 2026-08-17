@@ -264,9 +264,33 @@ directory (atomic writes, saves serialized so a burst from the route panel can't
 itself). Same envelopes as the cloud, so the app can't tell the difference — and route
 planning now works with no uplink at all, which is when you actually want it.
 
-**This copy is boat-local and does not sync.** A route saved on board stays on board; a
-route saved in the web app stays in the cloud. Merging the two needs conflict resolution
-worth designing properly rather than guessing at, so for now they are simply separate.
+**This copy is boat-local.** A route saved on board stays on board; a route saved in the
+web app stays in the cloud. They are not reconciled in the background — but you can copy
+either way, item by item, from the **Sync polars & routes** page in the Signal K Webapps
+menu.
+
+### Sync page — copying polars and routes to and from the cloud
+
+Sign in once with your sailkick account and the page lists polars and routes on both
+sides, marking each **in sync**, **differs**, **boat only** or **cloud only**, with a
+button to copy it either way. Nothing is deleted, and an item that already exists is only
+overwritten after a confirmation.
+
+The plugin holds the session, not the browser. That is what makes this possible at all:
+the cloud session cookie is `HttpOnly; SameSite=Lax; Secure`, and the boat serves the app
+over plain HTTP on a LAN address — a browser will not store a Secure cookie on an http
+origin, will not send a Lax cookie cross-site, and blocks an https page from fetching http
+at all. Those are all *browser* rules; the plugin is an ordinary HTTP client talking https
+to the cloud, so none of them apply, and the browser only ever talks to the boat.
+
+**Only the session is stored, never the password** — it buys a session and is discarded.
+The session lasts 30 days, after which the page asks you to sign in again. The endpoints
+live on the plugin's own router, which sits behind Signal K's security, rather than on the
+open mirror port where anyone on the boat's wifi could use them.
+
+Items are matched by **name**, since ids are assigned independently on each side. So a
+polar you refined in the web app appears as *cloud only* — or *differs* if the boat has an
+older one of the same name — and one click brings it aboard.
 
 ## Local history (offline Trends + track)
 **One source: a live ring**, sampled from the same BoatState that feeds `/ws/telemetry`
