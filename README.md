@@ -292,6 +292,40 @@ Items are matched by **name**, since ids are assigned independently on each side
 polar you refined in the web app appears as *cloud only* — or *differs* if the boat has an
 older one of the same name — and one click brings it aboard.
 
+## Several devices publishing the same value
+
+A real N2K network usually has more than one device announcing a given path, and they do
+not always agree. On the boat this was developed against: three sources for
+`navigation.speedThroughWater`, one of them reporting a constant **0**; and two compasses
+on `navigation.headingMagnetic` **7.5° apart**. Whichever delta arrived last won, so speed
+dropped to zero intermittently and heading — which the app derives from magnetic heading
+plus variation, and which feeds the true-wind calculation — wandered.
+
+**The plugin does not arbitrate this, and deliberately so.** Signal K already resolves it
+from `sourcePriorities` in `settings.json`, applied in its delta pipeline *before* any
+consumer sees the value, so one setting fixes the app, KIP, the instruments, the local
+history ring and the telemetry going to the cloud all at once. Set it under
+**Server → Settings → Source Priorities**:
+
+```json
+"navigation.speedThroughWater": [{ "sourceRef": "NMEA.27", "timeout": "" }],
+"navigation.headingMagnetic":   [{ "sourceRef": "NMEA.23", "timeout": "" }]
+```
+
+To find the culprit, compare sources on one path:
+
+```bash
+curl -s http://<boat>:3000/signalk/v1/api/vessels/self/navigation/speedThroughWater
+```
+
+`values` lists every source and what each is reporting; `$source` is whichever last won.
+A path where they disagree is worth pinning. Where a cross-check exists it settles which
+is right — magnetic heading plus variation should equal the reported true heading, and on
+that boat one compass matched to 0.25° while the other was 7.5° out.
+
+Note that a de-prioritised source still appears **once** when a client subscribes: Signal K
+replays current values on subscription. That is a single stale sample, not a live feed.
+
 ## Local history (offline Trends + track)
 **One source: a live ring**, sampled from the same BoatState that feeds `/ws/telemetry`
 — no database, works on a Victron GX with nothing else installed. `historyAvailable` is

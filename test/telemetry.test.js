@@ -255,3 +255,46 @@ test('contract check: offline is not drift, and a drift is logged once, not ever
   assert.strictEqual(warnings.length, 1, 'warned once, not once per 5-minute poll')
   await new Promise((r) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(r) })
 })
+
+// --- source arbitration belongs to Signal K (v0.22.3) -------------------------------
+// This module used to lock onto the first $source seen for navigation.headingMagnetic
+// and ignore the rest. Measured on the boat, that guard was a coin flip between a
+// Precision-9 and a ZG100 reading 7.5° apart — and once sourcePriorities was configured
+// it became actively harmful, because Signal K REPLAYS current values when a client
+// subscribes. The first headingMagnetic delta after a restart can therefore be a one-off
+// from a de-prioritised device, and latching onto it discarded every real delta that
+// followed: heading frozen at a stale value rather than merely wrong.
+const withSrc = (src, values) => ({
+  context: 'vessels.self',
+  updates: [{ $source: src, timestamp: new Date().toISOString(), values }]
+})
+
+test('telemetry: a one-off replay from another source cannot freeze heading', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(withSrc('NMEA.128', [{ path: 'navigation.position', value: { latitude: 43.9, longitude: -64.8 } }]))
+
+  // Exactly the boat's shape: ONE stale delta from the de-prioritised compass at
+  // subscribe time, then a steady stream from the real one.
+  t._ingest(withSrc('NMEA.128', [{ path: 'navigation.headingMagnetic', value: 1.9092 }])) // ZG100, 109.4°
+  for (let i = 0; i < 5; i++) {
+    t._ingest(withSrc('NMEA.23', [{ path: 'navigation.headingMagnetic', value: 2.0369 }])) // Precision-9, 116.7°
+  }
+  const s = t._state()
+  assert.ok(Math.abs(s.hdgMagDeg - 116.71) < 0.05,
+    `heading must follow the live source, got ${s.hdgMagDeg} — the old guard froze it at the replay`)
+})
+
+test('telemetry: whatever Signal K delivers is used, whichever source it carries', () => {
+  // With sourcePriorities set, only one source reaches us per path; the plugin must not
+  // second-guess that. A source CHANGE is legitimate — a failover after the preferred
+  // device goes quiet — and must be followed, not ignored.
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(withSrc('NMEA.23', [
+    { path: 'navigation.position', value: { latitude: 1, longitude: 2 } },
+    { path: 'navigation.headingMagnetic', value: 1.0 }
+  ]))
+  assert.ok(Math.abs(t._state().hdgMagDeg - 57.3) < 0.1, 'first source used')
+
+  t._ingest(withSrc('NMEA.128', [{ path: 'navigation.headingMagnetic', value: 2.0 }]))
+  assert.ok(Math.abs(t._state().hdgMagDeg - 114.6) < 0.1, 'a failover to another source is followed')
+})
