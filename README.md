@@ -52,6 +52,15 @@ files to send later — nothing is lost in the gap.
 
 - Network errors, `429` and `5xx` are retried with backoff (1 s → 60 s); the data stays
   on disk.
+- **The write path uses core `https`, not `fetch`.** Twice in one afternoon this boat's
+  Signal K process stopped being able to open *any* outbound HTTPS connection — zero
+  sockets to `:443`, while a second process in the same container reached the same host
+  in under a second — and it never recovered on its own. Starlink sits behind CGNAT,
+  which drops idle NAT mappings without an RST, so a pooled keep-alive socket looks alive
+  to the client and is dead on the wire. `fetch` offers no supported way to reset its
+  pool from a plugin. Owning an agent means the pool can be rebuilt after repeated
+  transport failures (and it is, automatically), and it also means the log names
+  `ECONNRESET` or `ETIMEDOUT` instead of `fetch`'s uniformly useless "fetch failed".
 - A malformed batch (`4xx` other than the three below) is quarantined to `spool/dead/`
   rather than retried forever, because it would otherwise wedge the queue behind it.
 - **`404`, `401` and `403` are held, not quarantined.** A missing bucket or a rejected

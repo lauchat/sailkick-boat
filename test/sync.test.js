@@ -133,3 +133,128 @@ test('sync: a genuinely malformed batch (422) is still quarantined', async () =>
   assert.strictEqual(h.counts().spool, 0, 'and cleared from the queue')
   await h.close()
 })
+
+// --- the wedged-process incident (v0.23.2) ------------------------------------------
+// Twice in one afternoon the Signal K process could not open ANY outbound HTTPS while a
+// second process in the same container reached the same host in under a second: zero
+// sockets to :443, live connections to the Starlink dish and the local database, no
+// resource exhaustion, and no recovery for 33 minutes. Starlink is behind CGNAT, which
+// drops idle NAT mappings without an RST, so a pooled keep-alive socket looks alive to
+// the client and is dead on the wire — and fetch() gives no supported way to reset its
+// pool from here (undici is not requirable on the boat).
+//
+// So the write path now uses core https with an agent we own, which buys two things:
+// the pool can be thrown away, and the real error code is visible instead of fetch's
+// uniformly useless "fetch failed".
+const { writeLines, resetTransport, _agents } = require('../lib/sync/influxWrite')
+
+test('write: reports the REAL error code, not "fetch failed"', async () => {
+  // A closed port: the reason must reach the caller so a wedged process and a boat at
+  // sea stop producing identical logs.
+  const probe = http.createServer()
+  await new Promise((r) => probe.listen(0, r))
+  const port = probe.address().port
+  await new Promise((r) => probe.close(r))
+
+  const res = await writeLines({ influxUrl: `http://127.0.0.1:${port}`, org: 'o', bucket: 'b', token: 't', timeoutMs: 2000 }, 'm value=1 1\n')
+  assert.strictEqual(res.ok, false)
+  assert.strictEqual(res.networkError, true)
+  assert.strictEqual(res.retryable, true, 'a transport failure is retryable')
+  assert.strictEqual(res.code, 'ECONNREFUSED', 'the actual cause, not "fetch failed"')
+})
+
+test('write: statuses keep their existing meaning through the new transport', async () => {
+  const cases = [[204, { ok: true }], [404, { configError: true }], [401, { configError: true }],
+    [500, { retryable: true }], [429, { retryable: true }], [422, { retryable: false }]]
+  for (const [code, want] of cases) {
+    const srv = http.createServer((req, res) => { res.statusCode = code; res.end(code === 204 ? undefined : '{"m":"x"}') })
+    await new Promise((r) => srv.listen(0, r))
+    const res = await writeLines({ influxUrl: `http://127.0.0.1:${srv.address().port}`, org: 'o', bucket: 'b', token: 't', timeoutMs: 5000 }, 'm value=1 1\n')
+    for (const [k, v] of Object.entries(want)) assert.strictEqual(res[k], v, `HTTP ${code} -> ${k}`)
+    if (code === 204) assert.strictEqual(res.ok, true)
+    srv.closeAllConnections && srv.closeAllConnections()
+    await new Promise((r) => srv.close(r))
+  }
+})
+
+test('write: the body still arrives gzipped and intact', async () => {
+  let got = null
+  const srv = http.createServer((req, res) => {
+    const c = []
+    req.on('data', (x) => c.push(x))
+    req.on('end', () => {
+      got = { enc: req.headers['content-encoding'], auth: req.headers.authorization, body: require('node:zlib').gunzipSync(Buffer.concat(c)).toString() }
+      res.statusCode = 204; res.end()
+    })
+  })
+  await new Promise((r) => srv.listen(0, r))
+  const line = 'navigation.speedOverGround,self=true value=5.5 1787000000000000000\n'
+  const res = await writeLines({ influxUrl: `http://127.0.0.1:${srv.address().port}`, org: 'sailkick', bucket: 'b_raw', token: 'WTOK', timeoutMs: 5000 }, line)
+  assert.strictEqual(res.ok, true)
+  assert.strictEqual(got.enc, 'gzip')
+  assert.strictEqual(got.auth, 'Token WTOK')
+  assert.strictEqual(got.body, line, 'byte-for-byte')
+  srv.closeAllConnections && srv.closeAllConnections()
+  await new Promise((r) => srv.close(r))
+})
+
+test('write: resetTransport throws the pool away and the next write builds a fresh one', async () => {
+  const srv = http.createServer((req, res) => { res.statusCode = 204; res.end() })
+  await new Promise((r) => srv.listen(0, r))
+  const cfg = { influxUrl: `http://127.0.0.1:${srv.address().port}`, org: 'o', bucket: 'b', token: 't', timeoutMs: 5000 }
+
+  assert.strictEqual((await writeLines(cfg, 'm value=1 1\n')).ok, true)
+  const before = _agents()
+  assert.ok(before, 'a pool exists')
+
+  const gen = resetTransport()
+  assert.ok(gen >= 1, 'reset is counted, so the log can name a generation')
+  assert.strictEqual(_agents(), null, 'the poisoned pool is gone')
+
+  assert.strictEqual((await writeLines(cfg, 'm value=2 2\n')).ok, true, 'writes still work after a reset')
+  assert.notStrictEqual(_agents(), before, 'and on a NEW pool')
+  srv.closeAllConnections && srv.closeAllConnections()
+  await new Promise((r) => srv.close(r))
+})
+
+test('sync: rebuilds the pool after repeated transport failures, then recovers', async () => {
+  // The incident, end to end: writes fail at the transport level, the pool is rebuilt,
+  // and when the endpoint returns the spool drains — with no restart.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-wedge-'))
+  const warnings = []
+  let up = false
+  const srv = http.createServer((req, res) => {
+    if (!up) { req.destroy(); return } // connection killed — a transport failure
+    res.statusCode = 204; res.end()
+  })
+  await new Promise((r) => srv.listen(0, r))
+
+  let onDelta = null
+  const app = {
+    getDataDirPath: () => dir, debug () {}, error (m) { warnings.push(m) },
+    selfContext: 'vessels.self',
+    subscriptionmanager: { subscribe (sub, un, err, cb) { onDelta = cb } }
+  }
+  const s = createSync(app, {
+    influxUrl: `http://127.0.0.1:${srv.address().port}`, org: 'o', bucket: 'b', token: 't',
+    spoolDir: path.join(dir, 'spool'), flushIntervalMs: 20, retryMinMs: 20, retryMaxMs: 40
+  })
+  s.start()
+  await delay(60)
+  onDelta({ context: 'vessels.self', updates: [{ $source: 't', timestamp: new Date().toISOString(), values: [{ path: 'navigation.speedOverGround', value: 5 }] }] })
+  await delay(700)
+
+  const rebuilt = warnings.filter((w) => /rebuilt the connection pool/.test(w))
+  assert.ok(rebuilt.length > 0, 'the pool was rebuilt after repeated transport failures')
+  assert.ok(warnings.some((w) => /unreachable \(ECONNRESET|unreachable \(EPIPE|unreachable \(ECONNREFUSED/.test(w)),
+    'and the log names the real code: ' + warnings.filter((w) => /unreachable/.test(w))[0])
+  const dead = (() => { try { return fs.readdirSync(path.join(dir, 'spool', 'dead')).length } catch { return 0 } })()
+  assert.strictEqual(dead, 0, 'nothing quarantined — a transport failure is not bad data')
+
+  up = true // the endpoint comes back
+  for (let i = 0; i < 60 && fs.readdirSync(path.join(dir, 'spool')).filter((f) => f.endsWith('.lp')).length; i++) await delay(25)
+  assert.strictEqual(fs.readdirSync(path.join(dir, 'spool')).filter((f) => f.endsWith('.lp')).length, 0, 'the spool drained with no restart')
+  s.stop()
+  srv.closeAllConnections && srv.closeAllConnections()
+  await new Promise((r) => srv.close(r))
+})
