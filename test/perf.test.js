@@ -248,3 +248,42 @@ test('ring: perf is a channel, and a guarded sample gaps rather than reading zer
   assert.strictEqual(s.series.perf.length, 1, 'the guarded sample is absent, not 0')
   r.destroy && r.destroy()
 })
+
+// --- the wiring, not just the parts (v0.23.1) ---------------------------------------
+// The ring channel and the perf module were both correct and unit-tested, yet `perf` was
+// absent from the boat's /api/history/series: lib/history/index.js accepted perfSource
+// and never passed it to RingHistoryProvider. Every existing test constructed the ring
+// DIRECTLY, so the one line that joins them was covered by nothing. This drives the same
+// entry point the plugin uses.
+const { createHistory } = require('../lib/history')
+
+test('history: createHistory passes perfSource through to the ring', async () => {
+  const dir = tmp()
+  const h = createHistory({ debug () {}, error () {} }, {
+    ringSource: { getState: () => ({ sogKt: 6, cogDeg: 90, headingDeg: 90, lat: 1, lon: 2 }) },
+    perfSource: { getPerf: () => 87 },
+    ringSampleSec: 1,
+    ringWindowSec: 60,
+    ringPersist: false,
+    storeDir: dir
+  })
+  h.start()
+  const res = await new Promise((resolve) => {
+    const req = { url: '/api/history/series?window=60s&every=1s', method: 'GET', headers: {} }
+    const r = { statusCode: 200, setHeader () {}, on () {}, once () {}, end (b) { resolve(JSON.parse(b)) } }
+    h.handleSeries(req, r)
+  })
+  assert.ok(res.series.perf, 'perf reaches the served series — this is what was broken')
+  assert.strictEqual(res.series.perf[0][1], 87)
+  h.stop()
+})
+
+test('history: no perfSource is not an error — the channel is simply absent', () => {
+  const h = createHistory({ debug () {}, error () {} }, {
+    ringSource: { getState: () => ({ sogKt: 6, lat: 1, lon: 2 }) },
+    ringSampleSec: 1, ringWindowSec: 60, ringPersist: false, storeDir: tmp()
+  })
+  h.start()
+  assert.strictEqual(h.available(), true, 'history still works without perf')
+  h.stop()
+})
