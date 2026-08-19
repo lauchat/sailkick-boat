@@ -146,7 +146,8 @@ test('sync: a genuinely malformed batch (422) is still quarantined', async () =>
 // So the write path now uses core https with an agent we own, which buys two things:
 // the pool can be thrown away, and the real error code is visible instead of fetch's
 // uniformly useless "fetch failed".
-const { writeLines, resetTransport, _agents } = require('../lib/sync/influxWrite')
+const { writeLines, resetTransport } = require('../lib/sync/influxWrite')
+const { _agents } = require('../lib/net') // the pool is shared plugin-wide now
 
 test('write: reports the REAL error code, not "fetch failed"', async () => {
   // A closed port: the reason must reach the caller so a wedged process and a boat at
