@@ -248,7 +248,13 @@ test('ring: samples and serves every channel the app has a cell for', () => {
     wptBrgDeg: 54.4, wptDistNm: 4.37, wptVmgKt: 4.99, wptTtgSec: 3152,
     lat: 43.91, lon: -64.82
   }
-  const r = new RingHistoryProvider({ source: { getState: () => state }, sampleSec: 1, windowSec: 60 })
+  // perf is COMPUTED (lib/perf), not mapped off the bus, so it needs its own source.
+  const r = new RingHistoryProvider({
+    source: { getState: () => state },
+    perfSource: { getPerf: () => 94 },
+    sampleSec: 1,
+    windowSec: 60
+  })
   const { series } = r.getSeries({ windowSec: 60 })
   r.destroy && r.destroy()
 
@@ -257,6 +263,7 @@ test('ring: samples and serves every channel the app has a cell for', () => {
   assert.strictEqual(series.cog[0][1], 46.4, 'cog was sampled but never emitted before')
   assert.strictEqual(series.wptDist[0][1], 4.37)
   assert.strictEqual(series.rpmStbd[0][1], 0, 'a legitimate zero is not "empty"')
+  assert.strictEqual(series.perf[0][1], 94, 'the computed polar percentage')
   assert.ok(Math.abs(series.vmg[0][1] + 5.02) < 1e-9, 'VMG keeps its sign')
 })
 

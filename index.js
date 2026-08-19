@@ -10,6 +10,7 @@ const { createBackfill } = require('./lib/backfill')
 const { createAis } = require('./lib/ais')
 const { createAisTargets } = require('./lib/ais/targets')
 const { createProfile } = require('./lib/profile')
+const { createPerf } = require('./lib/perf')
 const { createCloud } = require('./lib/cloud')
 const { resolveAccountConfig } = require('./lib/account')
 
@@ -100,6 +101,7 @@ module.exports = function (app) {
   let aisTargets = null
   let profile = null
   let cloud = null
+  let perf = null
   let proxyPort = null // what the launcher page needs to build its links
   let pairedSlug = null
   let statusTimer = null
@@ -356,12 +358,31 @@ module.exports = function (app) {
           telemetry = null
         }
       }
+      // Live polar performance, computed here so it becomes a RECORDED channel: it rides
+      // the same spool as everything else, so an offline passage replays it gapless.
+      // Needs telemetry (it samples BoatState) and must exist before history (which
+      // samples it), hence the position.
+      if (telemetry) {
+        try {
+          perf = createPerf(app, {
+            source: telemetry,
+            pluginId: plugin.id,
+            storeDir: store,
+            profileFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'profile.json')
+          })
+          perf.start()
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] performance start failed: ' + e.message)
+          perf = null
+        }
+      }
+
       if (pOpts.history.enabled !== false) {
         try {
           // ringSource = the telemetry module: when no local InfluxDB token is set
           // (the common case, e.g. a Victron GX), history serves a DB-less ring from
           // live telemetry. storeDir puts the persistent ring log on the SSD.
-          history = createHistory(app, { ...pOpts.history, ringSource: telemetry, storeDir: store })
+          history = createHistory(app, { ...pOpts.history, ringSource: telemetry, perfSource: perf, storeDir: store })
           history.start()
           pOpts.history = history // proxy dispatches /api/history to it when available()
         } catch (e) {
@@ -459,6 +480,7 @@ module.exports = function (app) {
     if (history) parts.push(history.status())
     if (aisTargets) parts.push(aisTargets.status())
     if (profile) parts.push(profile.status())
+    if (perf) parts.push(perf.status())
     if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
@@ -473,6 +495,7 @@ module.exports = function (app) {
     try { if (aisTargets) aisTargets.stop() } catch {}
     try { if (profile) profile.stop() } catch {}
     try { if (cloud) cloud.stop() } catch {}
+    try { if (perf) perf.stop() } catch {}
     try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
@@ -484,6 +507,7 @@ module.exports = function (app) {
     aisTargets = null
     profile = null
     cloud = null
+    perf = null
     proxyPort = null
     pairedSlug = null
     proxy = null

@@ -292,6 +292,44 @@ Items are matched by **name**, since ids are assigned independently on each side
 polar you refined in the web app appears as *cloud only* — or *differs* if the boat has an
 older one of the same name — and one click brings it aboard.
 
+## Live polar performance, computed on board
+
+The plugin computes **percentage of polar target** (boat speed ÷ what the polar says you
+should be doing) and emits it as two ordinary SignalK deltas:
+
+```
+performance.polarSpeed        target boat speed, m/s
+performance.polarSpeedRatio   achieved / target, 0–1
+```
+
+Because they are deltas, everything downstream gets them for nothing: telemetry sync
+forwards them to the cloud through the same store-and-forward spool as every raw channel
+— so an offline passage replays them **gapless** rather than leaving a hole — NMEA
+displays and other plugins can read them natively, and the local history ring records the
+rounded percentage as a `perf` channel for offline Trends.
+
+The maths is **vendored verbatim** from the app (`shared/engine/perf-live.js` and the pure
+`Polar` evaluator), each file carrying its upstream commit and sha256. There is one
+definition of "the %" — the boat and the screens must not quietly disagree — and
+`test/perf.test.js` replays the upstream test suite against the vendored copy to prove it.
+Fix the maths upstream and re-vendor; never edit the copy.
+
+**Nothing is emitted unless the guards pass.** In irons (inside the no-go angle), under
+2 kt of wind, or against a near-zero target, the channel simply stops. A gap is the honest
+representation; a zero would be a lie that drags down every average drawn over it.
+
+**No paddlewheel?** The percentage falls back to SOG, which the screens do too — but SOG
+is polluted by current, so the status line says `(from SOG — current-polluted)` rather
+than presenting it as a through-water figure.
+
+**Polar staleness.** The percentage is computed against whichever polar the boat has. If
+you refine your polar ashore, the boat keeps using its own copy until you bring it across
+on the **Sync polars & routes** page — this is a manual copy, not background sync. And a
+catalogue polar has to have been fetched at least once while online before it can be used
+at all. The raw channels are always recorded regardless, so the cloud can recompute the
+history if the maths ever changes: the recorded channel is a materialisation, not the only
+truth.
+
 ## Several devices publishing the same value
 
 A real N2K network usually has more than one device announcing a given path, and they do
