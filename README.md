@@ -363,6 +363,24 @@ differ by the transducer offset (0.3 m here), so the reading would oscillate in 
 water where the sounder streams. Same rule, with `belowSurface` preferred — the honest
 "how much water is under me" figure, and what the mapper itself calls preferred.
 
+## Heading: the boat's own true heading
+
+Two ways to know true heading — the boat publishes `navigation.headingTrue`, or it is
+derived from `headingMagnetic + magneticVariation`. The plugin uses the **published**
+value.
+
+The vendored mapper prefers the derivation, for a real reason: some boats publish a stale
+or static `headingTrue` (the app met one frozen at 151° while its compass read true
+~293°). Rather than avoid the published value because it *can* be wrong, the plugin
+checks it: both numbers are in hand, so it uses `headingTrue` while it corroborates the
+compass and falls back to the derivation — saying so in the log, once — when they differ
+by more than 10°. A frozen heading diverges by tens of degrees within a single turn, so
+that threshold is generous. Measured on this boat the two agree to 0.5°.
+
+This also lines the boat up with the cloud's history provider, which takes `headingTrue`
+first. (Its fallback converts `headingMagnetic` **without** adding variation, so a boat
+publishing only magnetic gets raw magnetic in Trends — an upstream bug, flagged.)
+
 ## Several devices publishing the same value
 
 A real N2K network usually has more than one device announcing a given path, and they do

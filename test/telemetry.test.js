@@ -406,3 +406,69 @@ test('telemetry: the two precedence groups do not interfere', () => {
   assert.strictEqual(s.depthM, 30, 'depth group held')
   assert.ok(Math.abs(s.stwKt - 6) < 0.01, 'and an ungrouped value in the same delta got through')
 })
+
+// --- prefer the boat's published true heading (v0.23.6) ------------------------------
+// Requested: use navigation.headingTrue rather than deriving it from magnetic +
+// variation. The vendored mapper prefers the derivation because a stale/static
+// headingTrue is a real failure mode (the app met one frozen at 151° while the compass
+// read true ~293°). We hold both numbers, so the pathology is detectable: prefer the
+// published value while it corroborates the compass, fall back when it does not.
+const hdg = (magRad, varRad, trueRad) => {
+  const vals = [fix()]
+  if (magRad != null) vals.push({ path: 'navigation.headingMagnetic', value: magRad })
+  if (varRad != null) vals.push({ path: 'navigation.magneticVariation', value: varRad })
+  if (trueRad != null) vals.push({ path: 'navigation.headingTrue', value: trueRad })
+  return delta(vals)
+}
+const D = Math.PI / 180
+
+test('heading: the published headingTrue is used when it corroborates the compass', () => {
+  // The boat's real numbers: magnetic 65.80°, variation -16.29° -> derived 49.52°;
+  // published 49.00°. 0.52° apart, so the published value wins.
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(hdg(65.80 * D, -16.29 * D, 49.00 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 49.00) < 0.01, `got ${t._state().headingDeg}`)
+})
+
+test('heading: a stale headingTrue is rejected in favour of the compass, loudly', () => {
+  // The documented pathology: headingTrue frozen at 151° while the compass reads ~293°.
+  const errs = []
+  const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
+  t._ingest(hdg(293 * D, 0.0001, 151 * D))
+  const s = t._state()
+  assert.ok(Math.abs(s.headingDeg - 293) < 0.5, `compass used, got ${s.headingDeg}`)
+  assert.ok(errs.some((e) => /disagrees with the compass/.test(e)), 'and it says so')
+  assert.strictEqual(errs.filter((e) => /disagrees with the compass/.test(e)).length, 1, 'once, not per delta')
+  for (let i = 0; i < 5; i++) t._ingest(hdg(293 * D, 0.0001, 151 * D))
+  assert.strictEqual(errs.filter((e) => /disagrees with the compass/.test(e)).length, 1, 'still once')
+})
+
+test('heading: falls back cleanly when only one source exists', () => {
+  const onlyTrue = createTelemetry({ debug () {} }, {})
+  onlyTrue._ingest(hdg(null, null, 100 * D))
+  assert.ok(Math.abs(onlyTrue._state().headingDeg - 100) < 0.01, 'published true alone')
+
+  const onlyMag = createTelemetry({ debug () {} }, {})
+  onlyMag._ingest(hdg(116 * D, -16 * D, null))
+  assert.ok(Math.abs(onlyMag._state().headingDeg - 100) < 0.01, 'compass + variation alone')
+
+  const noVar = createTelemetry({ debug () {} }, {})
+  noVar._ingest(hdg(116 * D, null, null))
+  assert.ok(Math.abs(noVar._state().headingDeg - 116) < 0.01, 'compass with no variation is still reported')
+})
+
+test('heading: recovers to the published value once it agrees again', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(hdg(293 * D, 0.0001, 151 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 293) < 0.5, 'rejected while stale')
+  t._ingest(hdg(293 * D, 0.0001, 292.5 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 292.5) < 0.01, 'adopted again when it corroborates')
+})
+
+test('heading: the disagreement test wraps across north', () => {
+  // 359° vs 1° is 2° apart, not 358 — a naive subtraction would reject a healthy boat
+  // every time it passed through north.
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(hdg(359 * D, 0.0001, 1 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 1) < 0.01, `published value kept, got ${t._state().headingDeg}`)
+})
