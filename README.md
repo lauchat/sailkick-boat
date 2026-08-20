@@ -357,6 +357,12 @@ the app already documents on its history side (great circle primary, the other t
 `fallback: true`): a lower-priority prefix is ignored while a better one is publishing,
 and takes over if that one goes quiet for 10 s.
 
+An audit of the mapper found exactly one other case: **depth**, fed by both
+`environment.depth.belowSurface` and `belowTransducer`. On a boat publishing both they
+differ by the transducer offset (0.3 m here), so the reading would oscillate in shallow
+water where the sounder streams. Same rule, with `belowSurface` preferred — the honest
+"how much water is under me" figure, and what the mapper itself calls preferred.
+
 ## Several devices publishing the same value
 
 A real N2K network usually has more than one device announcing a given path, and they do

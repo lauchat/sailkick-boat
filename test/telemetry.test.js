@@ -364,3 +364,45 @@ test('telemetry: non-course paths are untouched by the precedence filter', () =>
   assert.strictEqual(s.wptDistNm, 3, 'the course value was dropped')
   assert.ok(Math.abs(s.sogKt - 9.72) < 0.01, 'and the ordinary value in the same delta was not')
 })
+
+// --- the same trap on depth (v0.23.5) ------------------------------------------------
+// An audit of signalk-map.js for "one BoatState field, several paths" found exactly one
+// other case besides the waypoint group: depthM, fed by belowSurface AND belowTransducer.
+// On this boat both come from the same Airmar transducer 0.3 m apart — that gap IS
+// environment.depth.surfaceToTransducer — so in shallow water where the sounder streams,
+// the depth readout would oscillate the same way the waypoint distance did.
+test('telemetry: depth below surface wins over below transducer', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: 'environment.depth.belowSurface', value: 105.6 }]))
+  assert.strictEqual(t._state().depthM, 105.6)
+  for (let i = 0; i < 8; i++) {
+    t._ingest(delta([{ path: 'environment.depth.belowTransducer', value: 105.3 }]))
+    t._ingest(delta([{ path: 'environment.depth.belowSurface', value: 105.6 }]))
+  }
+  assert.strictEqual(t._state().depthM, 105.6, 'stable — the transducer reading never overwrites')
+})
+
+test('telemetry: below transducer is used when it is all the boat publishes', () => {
+  // Most boats publish only one. The precedence must not blank the reading for them.
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: 'environment.depth.belowTransducer', value: 12.4 }]))
+  assert.strictEqual(t._state().depthM, 12.4)
+})
+
+test('telemetry: the two precedence groups do not interfere', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(),
+    { path: 'navigation.courseGreatCircle.nextPoint.distance', value: 5556 },
+    { path: 'environment.depth.belowSurface', value: 30 }
+  ]))
+  // a lower-priority member of EACH group, in one delta
+  t._ingest(delta([
+    { path: 'navigation.course.calcValues.distance', value: 9999 },
+    { path: 'environment.depth.belowTransducer', value: 29.7 },
+    { path: 'navigation.speedThroughWater', value: 3.0866 }
+  ]))
+  const s = t._state()
+  assert.strictEqual(s.wptDistNm, 3, 'waypoint group held')
+  assert.strictEqual(s.depthM, 30, 'depth group held')
+  assert.ok(Math.abs(s.stwKt - 6) < 0.01, 'and an ungrouped value in the same delta got through')
+})
