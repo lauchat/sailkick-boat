@@ -369,13 +369,19 @@ Two ways to know true heading — the boat publishes `navigation.headingTrue`, o
 derived from `headingMagnetic + magneticVariation`. The plugin uses the **published**
 value.
 
-The vendored mapper prefers the derivation, for a real reason: some boats publish a stale
-or static `headingTrue` (the app met one frozen at 151° while its compass read true
-~293°). Rather than avoid the published value because it *can* be wrong, the plugin
-checks it: both numbers are in hand, so it uses `headingTrue` while it corroborates the
-compass and falls back to the derivation — saying so in the log, once — when they differ
-by more than 10°. A frozen heading diverges by tens of degrees within a single turn, so
-that threshold is generous. Measured on this boat the two agree to 0.5°.
+The vendored mapper prefers the derivation, citing a heading frozen at 151° while the
+compass read true ~293° — but that came from another vessel's AIS data, not from a boat's
+own instruments, so it is weak grounds for distrusting your own.
+
+A cross-check is still worth having against a genuinely stuck publisher, and it runs
+**only when variation is on the bus**, comparing two *true* headings. That condition
+matters: without variation the derivation is raw magnetic, so comparing against it would
+just measure the variation — 16° on this boat, over 20° in places — and reject a perfectly
+good `headingTrue`, reporting magnetic as true. The check would have caused the very error
+it exists to prevent. When variation is absent the boat is simply taken at its word.
+
+With both available a healthy boat sits near zero (0.5° here); a gap over 10° falls back
+to the compass and says so once, and recovers automatically.
 
 This also lines the boat up with the cloud's history provider, which takes `headingTrue`
 first. (Its fallback converts `headingMagnetic` **without** adding variation, so a boat

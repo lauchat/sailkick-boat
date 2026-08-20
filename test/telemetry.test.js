@@ -472,3 +472,30 @@ test('heading: the disagreement test wraps across north', () => {
   t._ingest(hdg(359 * D, 0.0001, 1 * D))
   assert.ok(Math.abs(t._state().headingDeg - 1) < 0.01, `published value kept, got ${t._state().headingDeg}`)
 })
+
+// --- the guard must not manufacture the error it guards against (v0.23.7) ------------
+// resolveHeadingDeg() returns RAW MAGNETIC when no variation is published. Comparing a
+// true heading against that measures the variation, nothing else — 16° on this boat, more
+// elsewhere. The first cut of this guard did exactly that and rejected a perfectly good
+// headingTrue, reporting magnetic as true: a 16° error introduced by the safety check.
+test('heading: with no variation published, the boat is taken at its word', () => {
+  const errs = []
+  const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
+  t._ingest(hdg(65.80 * D, null, 49.00 * D)) // 16° apart — that IS the variation
+  assert.ok(Math.abs(t._state().headingDeg - 49.00) < 0.01,
+    `must use the published 49.00°, got ${t._state().headingDeg}`)
+  assert.ok(!errs.some((e) => /disagrees/.test(e)), 'and must not warn — there was nothing to compare')
+})
+
+test('heading: a large variation is never itself a disagreement', () => {
+  // Variation reaches 20°+ in places. Each of these is a HEALTHY boat.
+  for (const varDeg of [-25, -16.29, -5, 0.5, 12, 24]) {
+    const magDeg = 100
+    const trueDeg = ((magDeg + varDeg) % 360 + 360) % 360
+    const errs = []
+    const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
+    t._ingest(hdg(magDeg * D, varDeg * D, trueDeg * D))
+    assert.ok(Math.abs(t._state().headingDeg - trueDeg) < 0.01, `variation ${varDeg}°: got ${t._state().headingDeg}`)
+    assert.ok(!errs.some((e) => /disagrees/.test(e)), `variation ${varDeg}° must not trip the guard`)
+  }
+})
