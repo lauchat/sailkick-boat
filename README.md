@@ -341,6 +341,22 @@ at all. The raw channels are always recorded regardless, so the cloud can recomp
 history if the maths ever changes: the recorded channel is a materialisation, not the only
 truth.
 
+## Two paths, one reading
+
+Source priorities solve *several devices on one path*. There is a second, separate case:
+**several paths that mean the same thing**. Signal K publishes active-waypoint course data
+under three prefixes — `navigation.courseGreatCircle.nextPoint.*`,
+`navigation.courseRhumbline.nextPoint.*` and `navigation.course.calcValues.*` — and the
+app maps all three onto the same readouts. A boat publishing more than one gets whichever
+delta arrived last, so the waypoint distance alternates: measured on this boat, 2049.48 nm
+from great circle against 2050.86 nm from the course provider, several times a second.
+
+`sourcePriorities` cannot fix that — it arbitrates sources on ONE path, and these are
+different paths, each legitimately sourced. The plugin therefore applies the precedence
+the app already documents on its history side (great circle primary, the other two
+`fallback: true`): a lower-priority prefix is ignored while a better one is publishing,
+and takes over if that one goes quiet for 10 s.
+
 ## Several devices publishing the same value
 
 A real N2K network usually has more than one device announcing a given path, and they do

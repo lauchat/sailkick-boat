@@ -298,3 +298,69 @@ test('telemetry: whatever Signal K delivers is used, whichever source it carries
   t._ingest(withSrc('NMEA.128', [{ path: 'navigation.headingMagnetic', value: 2.0 }]))
   assert.ok(Math.abs(t._state().hdgMagDeg - 114.6) < 0.1, 'a failover to another source is followed')
 })
+
+// --- three paths, one field (v0.23.4) ------------------------------------------------
+// Reported from the boat: WPT DST alternating between two numbers on the edge app while
+// the cloud was steady. Not a source conflict — Signal K publishes active-waypoint data
+// under THREE prefixes and signalk-map.js maps all of them onto wptDistNm, so whichever
+// delta landed last won. Measured: courseGreatCircle 2049.48 nm vs course.calcValues
+// 2050.86 nm, alternating several times a second. sourcePriorities cannot help: it
+// arbitrates sources on ONE path, and these are different paths.
+const GC = 'navigation.courseGreatCircle.nextPoint.'
+const RL = 'navigation.courseRhumbline.nextPoint.'
+const CV = 'navigation.course.calcValues.'
+const fix = () => ({ path: 'navigation.position', value: { latitude: 48.4, longitude: -49.8 } })
+
+test('telemetry: great circle wins over calcValues for the waypoint readout', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: GC + 'distance', value: 3795632 }]))
+  assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, 'great circle sets it')
+
+  // the other publisher arrives, 1.4 nm out — it must NOT overwrite
+  t._ingest(delta([{ path: CV + 'distance', value: 3798190 }]))
+  assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, 'calcValues is ignored while GC is live')
+
+  // and repeated alternation must stay put — this is the flip-flop the user saw
+  for (let i = 0; i < 10; i++) {
+    t._ingest(delta([{ path: CV + 'distance', value: 3798190 }]))
+    t._ingest(delta([{ path: GC + 'distance', value: 3795632 }]))
+  }
+  assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, 'stable, not oscillating')
+})
+
+test('telemetry: precedence is great circle > rhumbline > calcValues', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: RL + 'distance', value: 1852 }]))
+  assert.strictEqual(t._state().wptDistNm, 1, 'rhumbline is used when it is the best available')
+  t._ingest(delta([{ path: CV + 'distance', value: 3704 }]))
+  assert.strictEqual(t._state().wptDistNm, 1, 'calcValues loses to rhumbline')
+  t._ingest(delta([{ path: GC + 'distance', value: 5556 }]))
+  assert.strictEqual(t._state().wptDistNm, 3, 'great circle takes over from both')
+  t._ingest(delta([{ path: RL + 'distance', value: 1852 }]))
+  assert.strictEqual(t._state().wptDistNm, 3, 'and keeps it')
+})
+
+test('telemetry: a lower-priority prefix takes over once the better one goes quiet', () => {
+  // A publisher that stops must hand over rather than freeze the readout for ever.
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: GC + 'distance', value: 5556 }]))
+  assert.strictEqual(t._state().wptDistNm, 3)
+  const realNow = Date.now
+  try {
+    Date.now = () => realNow() + 20000 // 20s later, past COURSE_STALE_MS
+    t._ingest(delta([{ path: CV + 'distance', value: 1852 }]))
+  } finally { Date.now = realNow }
+  assert.strictEqual(t._state().wptDistNm, 1, 'calcValues takes over after great circle goes stale')
+})
+
+test('telemetry: non-course paths are untouched by the precedence filter', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: GC + 'distance', value: 5556 }]))
+  t._ingest(delta([
+    { path: CV + 'distance', value: 9999 },        // filtered
+    { path: 'navigation.speedOverGround', value: 5 } // must survive the same batch
+  ]))
+  const s = t._state()
+  assert.strictEqual(s.wptDistNm, 3, 'the course value was dropped')
+  assert.ok(Math.abs(s.sogKt - 9.72) < 0.01, 'and the ordinary value in the same delta was not')
+})

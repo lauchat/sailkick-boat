@@ -1,6 +1,6 @@
 {
   "name": "sailkick-boat",
-  "version": "0.23.3",
+  "version": "0.23.4",
   "description": "Run the sailkick app on board with no internet: charts, weather, climatology, trends and AIS all served from the boat itself. With a sailkick account it also syncs your metrics to the cloud in real time. Alpha, invite-only \u2014 info@sailkick.io",
   "main": "index.js",
   "scripts": {
