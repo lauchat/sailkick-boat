@@ -97,3 +97,60 @@ test('plugin route: /p/* MISS then HIT; disabled -> 503', async (t) => {
 
   h.close(); up.srv.close()
 })
+
+// --- the relay must tolerate slow work (v0.23.8) -------------------------------------
+// Reported from the boat: routing in the webapp returned 502. Self-inflicted — 0.23.3
+// migrated passThrough onto the shared transport and applied the proxy's TILE timeout
+// (20s) to it. The original used fetch with no timeout at all, and /api/isochrone is
+// weather routing that the app itself allows 120s for (FETCH_TIMEOUT_MS in
+// public/engine/wind-client.js). Every route slower than 20s was killed by the mirror.
+test('relay: a POST slower than the tile timeout still succeeds', async (t) => {
+  let express
+  try { express = require('express') } catch { return t.skip('express not installed') }
+  const http = require('node:http')
+
+  // upstream that takes longer than the 20s tile budget would allow, scaled down: the
+  // test drives a 300ms "slow" response against a 100ms tile timeout and a 5s relay one.
+  const up = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', () => setTimeout(() => {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true, echoed: JSON.parse(body || '{}') }))
+    }, 300))
+  })
+  await new Promise((r) => up.listen(0, r))
+
+  const { createProxy } = require('../lib/proxy')
+  const store = tmp()
+  const proxy = createProxy({ debug () {} }, {
+    sailkickUrl: `http://127.0.0.1:${up.address().port}`,
+    proxyPort: 0,
+    storeDir: store,
+    requestTimeoutMs: 100, // tiles: deliberately shorter than the upstream delay
+    relayTimeoutMs: 5000, // the relay gets its own, generous budget
+    manifest: { enabled: false },
+    seed: { enabled: false }
+  })
+  proxy.start()
+
+  const res = await new Promise((resolve) => {
+    const chunks = [Buffer.from(JSON.stringify({ from: 'boat' }))]
+    let dataCb, endCb
+    const req = {
+      url: '/api/isochrone',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      on (ev, cb) { if (ev === 'data') dataCb = cb; if (ev === 'end') endCb = cb; return req },
+      [Symbol.asyncIterator] () { let done = false; return { next: async () => (done ? { done: true } : (done = true, { value: chunks[0], done: false })) } }
+    }
+    void dataCb; void endCb
+    const out = { statusCode: 200, headers: {}, setHeader (k, v) { this.headers[k] = v }, end (b) { this.body = b ? b.toString() : ''; resolve(this) } }
+    proxy._serveMirror(req, out)
+  })
+
+  assert.strictEqual(res.statusCode, 200, `relay must not time out; got ${res.statusCode} ${res.body}`)
+  assert.deepStrictEqual(JSON.parse(res.body).echoed, { from: 'boat' }, 'and the body round-trips')
+  proxy.stop()
+  await new Promise((r) => { up.closeAllConnections && up.closeAllConnections(); up.close(r) })
+})

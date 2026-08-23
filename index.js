@@ -45,7 +45,12 @@ const SYNC_TUNING = {
   retryMinMs: 1000,
   retryMaxMs: 60000
 }
-const PROXY_TUNING = { requestTimeoutMs: 20000, localPaths: ['/signalk'], telemetryPath: '/ws/telemetry' }
+// requestTimeoutMs is for CACHED fetches (tiles, assets) where 20s is generous.
+// relayTimeoutMs is for the transparent non-GET relay, which carries requests that are
+// legitimately slow: /api/isochrone is weather routing and the app itself allows 120s for
+// it (FETCH_TIMEOUT_MS in public/engine/wind-client.js). Applying the tile timeout to the
+// relay killed every route that took longer and returned 502.
+const PROXY_TUNING = { requestTimeoutMs: 20000, relayTimeoutMs: 180000, localPaths: ['/signalk'], telemetryPath: '/ws/telemetry' }
 const MANIFEST = { enabled: true, path: '/api/cache-manifest', pollIntervalSec: 300 }
 const SEED_TUNING = { coastlineMaxZoom: 8, seabedMaxZoom: 6, concurrency: 4 }
 const PREFETCH_TUNING = { concurrency: 4 }
@@ -286,6 +291,7 @@ module.exports = function (app) {
         localPaths: (p.localPaths && p.localPaths.length) ? p.localPaths : PROXY_TUNING.localPaths,
         telemetryPath: p.telemetryPath || PROXY_TUNING.telemetryPath,
         requestTimeoutMs: p.requestTimeoutMs || PROXY_TUNING.requestTimeoutMs,
+        relayTimeoutMs: p.relayTimeoutMs || PROXY_TUNING.relayTimeoutMs,
         openAccess: p.openAccess !== false, // single-tenant boat: the cloud login gate can't work over plain HTTP
         manifest: MANIFEST, // always on — freshness comes from the cloud announcing bakes
         seed: {

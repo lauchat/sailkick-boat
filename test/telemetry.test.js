@@ -407,12 +407,14 @@ test('telemetry: the two precedence groups do not interfere', () => {
   assert.ok(Math.abs(s.stwKt - 6) < 0.01, 'and an ungrouped value in the same delta got through')
 })
 
-// --- prefer the boat's published true heading (v0.23.6) ------------------------------
-// Requested: use navigation.headingTrue rather than deriving it from magnetic +
-// variation. The vendored mapper prefers the derivation because a stale/static
-// headingTrue is a real failure mode (the app met one frozen at 151° while the compass
-// read true ~293°). We hold both numbers, so the pathology is detectable: prefer the
-// published value while it corroborates the compass, fall back when it does not.
+// --- heading: compass for display, published value as the check (v0.23.8) -----------
+// Both candidates are TRUE headings and agree to 0.12° on this boat, so correctness does
+// not separate them. Resolution does: navigation.headingTrue (NAIS 500) is 1 Hz quantised
+// to 1°, while the Precision-9 is 20 Hz with 0.006° steps — the transponder rounds before
+// transmitting. Displaying the compass costs nothing in accuracy and gains 20x the rate.
+//
+// A DELIBERATE divergence from upstream, which made headingTrue authoritative in 348c3d9
+// on correctness grounds without weighing transmission rounding. Handed back.
 const hdg = (magRad, varRad, trueRad) => {
   const vals = [fix()]
   if (magRad != null) vals.push({ path: 'navigation.headingMagnetic', value: magRad })
@@ -422,80 +424,81 @@ const hdg = (magRad, varRad, trueRad) => {
 }
 const D = Math.PI / 180
 
-test('heading: the published headingTrue is used when it corroborates the compass', () => {
-  // The boat's real numbers: magnetic 65.80°, variation -16.29° -> derived 49.52°;
-  // published 49.00°. 0.52° apart, so the published value wins.
+test('heading: the compass drives the display when variation is known', () => {
   const t = createTelemetry({ debug () {} }, {})
-  t._ingest(hdg(65.80 * D, -16.29 * D, 49.00 * D))
-  assert.ok(Math.abs(t._state().headingDeg - 49.00) < 0.01, `got ${t._state().headingDeg}`)
+  t._ingest(hdg(84.163 * D, -16.28 * D, 68 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 67.883) < 0.01,
+    `compass 67.883° expected, got ${t._state().headingDeg} (68.000 would be the rounded published value)`)
 })
 
-test('heading: a stale headingTrue is rejected in favour of the compass, loudly', () => {
-  // The documented pathology: headingTrue frozen at 151° while the compass reads ~293°.
+test('heading: without variation the published value is used — never raw magnetic', () => {
+  // The failure upstream eliminated in 348c3d9: raw magnetic is wrong by the declination,
+  // 16° here. With no variation there is no valid compass option at all.
   const errs = []
   const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
-  t._ingest(hdg(293 * D, 0.0001, 151 * D))
-  const s = t._state()
-  assert.ok(Math.abs(s.headingDeg - 293) < 0.5, `compass used, got ${s.headingDeg}`)
-  assert.ok(errs.some((e) => /disagrees with the compass/.test(e)), 'and it says so')
-  assert.strictEqual(errs.filter((e) => /disagrees with the compass/.test(e)).length, 1, 'once, not per delta')
-  for (let i = 0; i < 5; i++) t._ingest(hdg(293 * D, 0.0001, 151 * D))
-  assert.strictEqual(errs.filter((e) => /disagrees with the compass/.test(e)).length, 1, 'still once')
+  t._ingest(hdg(84.163 * D, null, 68 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 68.0) < 0.01, `got ${t._state().headingDeg}`)
+  assert.ok(!errs.some((e) => /disagrees/.test(e)), 'and no false warning — nothing to compare')
 })
 
-test('heading: falls back cleanly when only one source exists', () => {
+test('heading: a stuck published value warns once but never replaces the compass', () => {
+  const errs = []
+  const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
+  for (let i = 0; i < 6; i++) t._ingest(hdg(293 * D, -0.01 * D, 151 * D))
+  assert.ok(Math.abs(t._state().headingDeg - 292.99) < 0.5, 'compass still displayed')
+  assert.strictEqual(errs.filter((e) => /disagrees with the compass/.test(e)).length, 1, 'warned exactly once')
+})
+
+test('heading: either source alone still produces a heading', () => {
   const onlyTrue = createTelemetry({ debug () {} }, {})
-  onlyTrue._ingest(hdg(null, null, 100 * D))
-  assert.ok(Math.abs(onlyTrue._state().headingDeg - 100) < 0.01, 'published true alone')
+  onlyTrue._ingest(hdg(null, null, 68 * D))
+  assert.ok(Math.abs(onlyTrue._state().headingDeg - 68) < 0.01)
 
-  const onlyMag = createTelemetry({ debug () {} }, {})
-  onlyMag._ingest(hdg(116 * D, -16 * D, null))
-  assert.ok(Math.abs(onlyMag._state().headingDeg - 100) < 0.01, 'compass + variation alone')
-
-  const noVar = createTelemetry({ debug () {} }, {})
-  noVar._ingest(hdg(116 * D, null, null))
-  assert.ok(Math.abs(noVar._state().headingDeg - 116) < 0.01, 'compass with no variation is still reported')
-})
-
-test('heading: recovers to the published value once it agrees again', () => {
-  const t = createTelemetry({ debug () {} }, {})
-  t._ingest(hdg(293 * D, 0.0001, 151 * D))
-  assert.ok(Math.abs(t._state().headingDeg - 293) < 0.5, 'rejected while stale')
-  t._ingest(hdg(293 * D, 0.0001, 292.5 * D))
-  assert.ok(Math.abs(t._state().headingDeg - 292.5) < 0.01, 'adopted again when it corroborates')
-})
-
-test('heading: the disagreement test wraps across north', () => {
-  // 359° vs 1° is 2° apart, not 358 — a naive subtraction would reject a healthy boat
-  // every time it passed through north.
-  const t = createTelemetry({ debug () {} }, {})
-  t._ingest(hdg(359 * D, 0.0001, 1 * D))
-  assert.ok(Math.abs(t._state().headingDeg - 1) < 0.01, `published value kept, got ${t._state().headingDeg}`)
-})
-
-// --- the guard must not manufacture the error it guards against (v0.23.7) ------------
-// resolveHeadingDeg() returns RAW MAGNETIC when no variation is published. Comparing a
-// true heading against that measures the variation, nothing else — 16° on this boat, more
-// elsewhere. The first cut of this guard did exactly that and rejected a perfectly good
-// headingTrue, reporting magnetic as true: a 16° error introduced by the safety check.
-test('heading: with no variation published, the boat is taken at its word', () => {
-  const errs = []
-  const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
-  t._ingest(hdg(65.80 * D, null, 49.00 * D)) // 16° apart — that IS the variation
-  assert.ok(Math.abs(t._state().headingDeg - 49.00) < 0.01,
-    `must use the published 49.00°, got ${t._state().headingDeg}`)
-  assert.ok(!errs.some((e) => /disagrees/.test(e)), 'and must not warn — there was nothing to compare')
+  const onlyCompass = createTelemetry({ debug () {} }, {})
+  onlyCompass._ingest(hdg(84.163 * D, -16.28 * D, null))
+  assert.ok(Math.abs(onlyCompass._state().headingDeg - 67.883) < 0.01)
 })
 
 test('heading: a large variation is never itself a disagreement', () => {
-  // Variation reaches 20°+ in places. Each of these is a HEALTHY boat.
+  // Variation reaches 20°+ in places. Every one of these is a HEALTHY boat, and an
+  // earlier cut of this guard rejected them all.
   for (const varDeg of [-25, -16.29, -5, 0.5, 12, 24]) {
     const magDeg = 100
     const trueDeg = ((magDeg + varDeg) % 360 + 360) % 360
     const errs = []
     const t = createTelemetry({ debug () {}, error: (m) => errs.push(m) }, {})
     t._ingest(hdg(magDeg * D, varDeg * D, trueDeg * D))
-    assert.ok(Math.abs(t._state().headingDeg - trueDeg) < 0.01, `variation ${varDeg}°: got ${t._state().headingDeg}`)
+    assert.ok(Math.abs(t._state().headingDeg - trueDeg) < 0.01, `variation ${varDeg}°`)
     assert.ok(!errs.some((e) => /disagrees/.test(e)), `variation ${varDeg}° must not trip the guard`)
   }
+})
+
+test('heading: the disagreement test wraps across north', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(hdg(1 * D, 0.0001, 359.5 * D)) // compass ~1°, published 359.5° — 1.5° apart
+  assert.ok(Math.abs(t._state().headingDeg - 1) < 0.05, `got ${t._state().headingDeg}`)
+})
+
+// --- cross-delta course precedence still matters after the re-vendor -----------------
+// Upstream b519a9f ranks course prefixes INSIDE signalkValuesToPatch, but courseRank is
+// per-call, so it only orders values within ONE delta. Here the publishers are different
+// sources sending separate deltas, so the boat-side filter is still what stops the
+// flip-flop.
+test('telemetry: course precedence holds ACROSS deltas, which upstream cannot see', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(), { path: 'navigation.courseGreatCircle.nextPoint.distance', value: 3795632 }]))
+  for (let i = 0; i < 8; i++) {
+    t._ingest(delta([{ path: 'navigation.course.calcValues.distance', value: 3798190 }]))
+    t._ingest(delta([{ path: 'navigation.courseGreatCircle.nextPoint.distance', value: 3795632 }]))
+  }
+  assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, `got ${t._state().wptDistNm}`)
+})
+
+test('telemetry: upstream handles the SAME-delta case on its own', () => {
+  const t = createTelemetry({ debug () {} }, {})
+  t._ingest(delta([fix(),
+    { path: 'navigation.course.calcValues.distance', value: 3798190 },
+    { path: 'navigation.courseGreatCircle.nextPoint.distance', value: 3795632 }
+  ]))
+  assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, 'great circle wins within one delta too')
 })

@@ -369,19 +369,29 @@ Two ways to know true heading — the boat publishes `navigation.headingTrue`, o
 derived from `headingMagnetic + magneticVariation`. The plugin uses the **published**
 value.
 
-The vendored mapper prefers the derivation, citing a heading frozen at 151° while the
-compass read true ~293° — but that came from another vessel's AIS data, not from a boat's
-own instruments, so it is weak grounds for distrusting your own.
+Both are TRUE headings and on this boat they agree to 0.12°, so correctness does not
+separate them. **Resolution does:**
 
-A cross-check is still worth having against a genuinely stuck publisher, and it runs
-**only when variation is on the bus**, comparing two *true* headings. That condition
-matters: without variation the derivation is raw magnetic, so comparing against it would
-just measure the variation — 16° on this boat, over 20° in places — and reject a perfectly
-good `headingTrue`, reporting magnetic as true. The check would have caused the very error
-it exists to prevent. When variation is absent the boat is simply taken at its word.
+| | rate | resolution |
+|---|---|---|
+| `navigation.headingTrue` (AIS transponder) | 1 Hz | whole degrees |
+| `navigation.headingMagnetic` (Precision-9) | 20 Hz | 0.006° |
 
-With both available a healthy boat sits near zero (0.5° here); a gap over 10° falls back
-to the compass and says so once, and recovers automatically.
+AIS transmits heading as an integer, so the transponder rounds before publishing. The
+compass is the same underlying sensor without that rounding, so using it costs nothing in
+accuracy and gains 20× the rate — a display that flows instead of stepping once a second.
+
+The published value is still used, as an **independent check**: if the two disagree by
+more than 10° something is broken and the log says so, naming both numbers. The displayed
+value does not change on the strength of that.
+
+The comparison runs **only when variation is on the bus** — without it the compass yields
+raw magnetic, which is wrong by the local declination (16° here), so there is no valid
+compass option at all and the boat's own `headingTrue` is used instead.
+
+> This is a deliberate divergence from the app, which makes `headingTrue` authoritative on
+> correctness grounds without weighing transmission rounding. Handed back upstream; if it
+> ever prefers the higher-resolution source when both are true, this can be dropped.
 
 This also lines the boat up with the cloud's history provider, which takes `headingTrue`
 first. (Its fallback converts `headingMagnetic` **without** adding variation, so a boat
