@@ -99,3 +99,69 @@ test('net: an in-flight request keeps the process alive; an idle pool does not',
   // and it exited on its own — execFileSync returning at all proves the idle pool did not
   // pin the event loop.
 })
+
+// --- what fetch() did for free and core http does not (v0.23.9) ----------------------
+// Reported from the boat: Cesium console full of "Failed to obtain terrain tile … Invalid
+// typed array length: 11239580910". The upstream serves terrain PRE-COMPRESSED and sets
+// Content-Encoding: gzip whether or not it was asked to. fetch decompressed transparently;
+// core http hands back the gzip stream, so the mirror cached gzip bytes labelled as
+// terrain and Cesium read the gzip header as a vertex count.
+const zlib = require('node:zlib')
+
+test('net: a gzip-encoded response is decoded, and the header is not replayed', async () => {
+  const payload = Buffer.from('quantized-mesh-ish payload'.repeat(40))
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-encoding', 'gzip')
+    res.setHeader('content-type', 'application/vnd.quantized-mesh')
+    res.end(zlib.gzipSync(payload))
+  })
+  await listen(srv)
+  const r = await request(`http://127.0.0.1:${srv.address().port}/t.terrain`, { timeoutMs: 5000 })
+  assert.ok(r.buffer.equals(payload), 'body decoded')
+  assert.notStrictEqual(r.buffer[0], 0x1f, 'not still gzip')
+  assert.strictEqual(r.headers.get('content-encoding'), null,
+    'the encoding header must be dropped — the cache would otherwise store a false claim')
+  assert.strictEqual(r.headers.get('content-type'), 'application/vnd.quantized-mesh', 'content-type survives')
+  await shut(srv)
+})
+
+test('net: deflate and brotli are decoded too; identity and unknown pass through', async () => {
+  const payload = Buffer.from('hello '.repeat(50))
+  for (const [enc, body] of [
+    ['deflate', zlib.deflateSync(payload)],
+    ['br', zlib.brotliCompressSync(payload)],
+    ['identity', payload]
+  ]) {
+    const srv = http.createServer((req, res) => { res.setHeader('content-encoding', enc); res.end(body) })
+    await listen(srv)
+    const r = await request(`http://127.0.0.1:${srv.address().port}/x`, { timeoutMs: 5000 })
+    assert.ok(r.buffer.equals(payload), `${enc} decoded`)
+    await shut(srv)
+  }
+})
+
+test('net: a truncated body is rejected, never returned as a short one', async () => {
+  // Core http emits 'end' on a dropped connection and leaves res.complete false. fetch
+  // rejects on a short body; without the explicit check a half-downloaded tile would be
+  // cached — and tiles are PINNED, so it would be served for ever.
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-length', '10000')
+    res.write(Buffer.alloc(100, 0x41))
+    res.socket.destroy() // cut it off mid-body
+  })
+  await listen(srv)
+  await assert.rejects(() => request(`http://127.0.0.1:${srv.address().port}/x`, { timeoutMs: 5000 }),
+    (e) => !!e.code, 'must throw rather than resolve with 100 of 10000 bytes')
+  await shut(srv)
+})
+
+test('net: corrupt encoded content fails loudly instead of being cached', async () => {
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-encoding', 'gzip')
+    res.end(Buffer.from('this is not gzip at all'))
+  })
+  await listen(srv)
+  await assert.rejects(() => request(`http://127.0.0.1:${srv.address().port}/x`, { timeoutMs: 5000 }),
+    (e) => !!e.code, 'a body that will not decode must not reach the cache')
+  await shut(srv)
+})

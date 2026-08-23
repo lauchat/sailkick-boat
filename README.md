@@ -52,6 +52,13 @@ files to send later — nothing is lost in the gap.
 
 - Network errors, `429` and `5xx` are retried with backoff (1 s → 60 s); the data stays
   on disk.
+- **Responses are decoded and checked for completeness.** Core `https` does neither, and
+  `fetch` did both silently: the upstream serves terrain tiles pre-compressed with
+  `Content-Encoding: gzip` whether asked to or not, so for one release the mirror cached
+  gzip bytes labelled as terrain and Cesium read the gzip header as a vertex count
+  ("Invalid typed array length: 11239580910"). A body shorter than its `Content-Length` is
+  now rejected too — tiles are pinned once written, so a truncated one would be served for
+  ever.
 - **All cloud traffic uses core `https`, not `fetch`** — telemetry sync, the offline
   mirror, the cache-manifest poller, the contract check, the backfill and the Sync page
   share one connection pool (`lib/net.js`), so one reset clears every subsystem. Twice in one afternoon this boat's
