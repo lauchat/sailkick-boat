@@ -612,8 +612,16 @@ cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge t
 serves the app's history endpoints from its **own** live data:
 ```
 GET /api/history/series?window=3600s&every=30s -> { series: { sog|heading|tws|… : [[tMs,val],…] } }
-GET /api/history/track?window=3600s            -> { track: [{ t, lat, lon }, …] }
+GET /api/history/track?window=3600s&every=10s  -> { track: [{ t, lat, lon }, …] }
+GET /api/history/track?from=<epochMs>&to=<epochMs>   (absolute range; ISO also accepted)
 ```
+Both endpoints take **either** a trailing `window`, **or** an absolute `from`/`to` —
+which is what the app sends whenever the view is scrolled back in time (the historic
+trail, and a Trends flyout on a past period). The response echoes the `from`/`to` it
+actually served. Before 0.24.0 the boat parsed only `window`, so a request for a past
+hour came back `200` with the **most recent** hour: the historic trail silently showed
+live data. `every` thins a long track and always keeps the first and newest fix.
+
 Same JSON the cloud returns, so the browser can't tell the difference — but it
 works **offline** with the boat's own data. Only when no telemetry source is
 available at all do these paths **fall through to the cloud mirror**, so an

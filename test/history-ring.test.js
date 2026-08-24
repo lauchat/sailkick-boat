@@ -291,3 +291,107 @@ test('ring: channel set matches the cloud provider', { skip: !fsx.existsSync(APP
   const missing = [...cloud].filter((c) => !CHANNELS.includes(c)).sort()
   assert.deepStrictEqual(missing, [], 'channels the cloud serves that the ring does not — Trends would differ by provider')
 })
+
+// --- absolute ranges for the historic trail (v0.23.10) --------------------------------
+// Reported: the historic trail does not work in edge mode. The app's fetchTrack sends
+// `from=<ms>&to=<ms>` for a scrolled-back view (public/engine/history-client.js), and the
+// boat parsed only `window` — so it silently returned the most RECENT hour instead. That
+// is worse than an error: the trail showed the current hour dressed up as history.
+// Measured on the boat: asked 15:56->16:56, got 16:56->17:56.
+const { createHistory: mkHistory } = require('../lib/history')
+
+function seeded (spanMin = 120) {
+  // A ring pre-loaded with a known span, so an absolute range has something to select.
+  const now = Date.now()
+  const rows = []
+  for (let i = spanMin; i >= 0; i--) {
+    rows.push({ t: now - i * 60000, sog: 5, cog: 90, heading: 90, lat: 48 + i * 0.001, lon: -25 - i * 0.001 })
+  }
+  const r = new RingHistoryProvider({ source: { getState: () => null }, sampleSec: 999999, windowSec: 86400 })
+  r._ring = rows
+  return { r, now }
+}
+
+test('ring: an absolute from/to selects that span, not the newest one', () => {
+  const { r, now } = seeded(120)
+  const fromMs = now - 120 * 60000
+  const toMs = now - 60 * 60000
+  const t = r.getTrack({ windowSec: 3600, fromMs, toMs }).track
+  assert.ok(t.length > 0, 'points returned')
+  assert.ok(t[0].t >= fromMs && t[t.length - 1].t <= toMs, 'every point inside the requested range')
+  // and it must NOT be the same as the trailing window
+  const trailing = r.getTrack({ windowSec: 3600 }).track
+  assert.notStrictEqual(t[0].t, trailing[0].t, 'a historic range differs from the last hour')
+  r.destroy && r.destroy()
+})
+
+test('ring: series honours an absolute range too', () => {
+  const { r, now } = seeded(120)
+  const s = r.getSeries({ windowSec: 3600, fromMs: now - 120 * 60000, toMs: now - 60 * 60000 })
+  const pts = s.series.sog
+  assert.ok(pts && pts.length, 'sog present')
+  assert.ok(pts[pts.length - 1][0] <= now - 60 * 60000, 'nothing newer than `to` leaked in')
+  r.destroy && r.destroy()
+})
+
+test('ring: `every` thins the trail but keeps the ends', () => {
+  const { r } = seeded(120)
+  const full = r.getTrack({ windowSec: 86400 }).track
+  const thin = r.getTrack({ windowSec: 86400, everySec: 600 }).track
+  assert.ok(thin.length < full.length, `thinned: ${thin.length} < ${full.length}`)
+  assert.strictEqual(thin[0].t, full[0].t, 'first point kept')
+  assert.strictEqual(thin[thin.length - 1].t, full[full.length - 1].t, 'newest fix never dropped')
+  for (let i = 1; i < thin.length - 1; i++) {
+    assert.ok(thin[i].t - thin[i - 1].t >= 600000, 'spacing respected')
+  }
+  r.destroy && r.destroy()
+})
+
+test('history: the HTTP handlers pass from/to through and echo the real range', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-abs-'))
+  const now = Date.now()
+  const h = mkHistory({ debug () {}, error () {} }, {
+    ringSource: { getState: () => ({ sogKt: 5, cogDeg: 90, headingDeg: 90, lat: 48, lon: -25 }) },
+    ringSampleSec: 1, ringWindowSec: 86400, ringPersist: false, storeDir: dir
+  })
+  h.start()
+  const prov = h._provider()
+  prov._ring = Array.from({ length: 121 }, (_, i) => ({
+    t: now - (120 - i) * 60000, sog: 5, cog: 90, heading: 90, lat: 48 + i * 0.001, lon: -25 - i * 0.001
+  }))
+  const call = (url) => new Promise((resolve) => {
+    const req = { url, method: 'GET', headers: {} }
+    const res = { statusCode: 200, setHeader () {}, on () {}, once () {}, end (b) { resolve(JSON.parse(b)) } }
+    h.handleTrack(req, res)
+  })
+  const fromMs = now - 120 * 60000
+  const toMs = now - 60 * 60000
+  const abs = await call(`/api/history/track?from=${fromMs}&to=${toMs}`)
+  assert.strictEqual(abs.ok, true)
+  assert.ok(abs.track.length > 0, 'points returned for the historic range')
+  assert.ok(abs.track[abs.track.length - 1].t <= toMs, 'nothing newer than `to`')
+  assert.strictEqual(abs.from, fromMs, 'the response echoes the range asked for')
+  assert.strictEqual(abs.to, toMs)
+
+  const win = await call('/api/history/track?window=3600s')
+  assert.ok(win.track[0].t > abs.track[0].t, 'the trailing window is a different, later span')
+  h.stop()
+})
+
+test('history: a malformed from/to falls back to the window rather than erroring', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-abs2-'))
+  const h = mkHistory({ debug () {}, error () {} }, {
+    ringSource: { getState: () => ({ sogKt: 5, lat: 48, lon: -25 }) },
+    ringSampleSec: 1, ringWindowSec: 3600, ringPersist: false, storeDir: dir
+  })
+  h.start()
+  const call = (url) => new Promise((resolve) => {
+    h.handleTrack({ url, method: 'GET', headers: {} },
+      { statusCode: 200, setHeader () {}, on () {}, once () {}, end (b) { resolve(JSON.parse(b)) } })
+  })
+  for (const bad of ['from=abc&to=def', 'from=100&to=50', 'from=', 'to=12345']) {
+    const r = await call(`/api/history/track?${bad}&window=600s`)
+    assert.strictEqual(r.ok, true, `"${bad}" still answers`)
+  }
+  h.stop()
+})

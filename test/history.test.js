@@ -100,7 +100,9 @@ test('proxy: routes /api/history to local history when available, else mirrors',
   proxy.start()
   const local = JSON.parse((await callTrack(proxy)).chunks)
   assert.ok(local.ok && Array.isArray(local.track), 'served from local history')
-  assert.ok(!local.from, 'did NOT come from the cloud mirror')
+  // NB: `from` is now a real field on our own answer too — it echoes the start of the
+  // range served (v0.24.0) — so the mirror is identified by its VALUE, not its presence.
+  assert.notStrictEqual(local.from, 'CLOUD-MIRROR', 'did NOT come from the cloud mirror')
 
   // no telemetry → falls through to the mirror, so an online boat is never worse off
   const hoff = createHistory(app, {}); hoff.start()
