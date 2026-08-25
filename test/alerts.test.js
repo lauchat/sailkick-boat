@@ -362,3 +362,44 @@ test('host: no rules is a quiet, valid state', () => {
   assert.match(h.a.status(), /no rules/)
   h.a.stop()
 })
+
+test('host: two sources fighting over the position are called out, because that alarm cannot fire', () => {
+  // Measured on this boat before navigation.position was pinned: a second source a median
+  // 2.3 km away, jumping up to 22.7 km fix-to-fix. The engine does not false-alarm on
+  // that — it does something worse. The far source reads "outside", the good one
+  // "inside", and a raise needs the condition to hold continuously, so the alternation
+  // resets the hold for ever and the anchor alarm silently never fires.
+  const h = host([ANCHOR])
+  h.feed({ lat: 43.0, lon: 6.0 }, 30)
+  h.feed({ lat: 43.05, lon: 6.05 }, 25) // ~6.6 km away, 5 s later
+  h.feed({ lat: 43.0, lon: 6.0 }, 20)
+  assert.ok(h.a._jumps() >= 2, `counted the jumps (${h.a._jumps()})`)
+  assert.match(h.a.status(), /position is JUMPING between sources/)
+  assert.ok(h.logs.some((m) => /more than one source is publishing navigation\.position/.test(m)),
+    'and names the fix: pin the source')
+  assert.strictEqual(h.logs.filter((m) => /more than one source/.test(m)).length, 1, 'said once, not per fix')
+  h.a.stop()
+})
+
+test('host: real GPS scatter at rest is never mistaken for a jump', () => {
+  // The actual receiver on this boat, at rest for 90 min: median 1.88 m from the centroid,
+  // max 2.91 m, fix-to-fix max 1.28 m. Nothing at that scale may trip the jump guard, or
+  // the warning becomes noise and gets ignored.
+  const h = host([ANCHOR])
+  for (let i = 0; i < 20; i++) {
+    h.feed({ lat: 43.0 + (i % 3 - 1) * 0.000018, lon: 6.0 + (i % 2 ? 0.000018 : -0.000018) }, 30 - i)
+  }
+  assert.strictEqual(h.a._jumps(), 0, 'metres of scatter are not a source conflict')
+  assert.match(h.a.status(), /none raised/)
+  h.a.stop()
+})
+
+test('host: a boat sailing fast is not a jump either', () => {
+  const h = host([ANCHOR])
+  // 12 kt for 5 s ~ 31 m. Well over MIN_JUMP_M would need 100 m in 5 s = 39 kt.
+  h.feed({ lat: 43.0, lon: 6.0 }, 40)
+  h.feed({ lat: 43.00028, lon: 6.0 }, 35)
+  h.feed({ lat: 43.00056, lon: 6.0 }, 30)
+  assert.strictEqual(h.a._jumps(), 0)
+  h.a.stop()
+})

@@ -393,6 +393,16 @@ Three behaviours worth knowing, because each is a way an alarm system becomes us
 - **A dead feed is not an alarm.** It goes to the status line and the log. It also never
   clears a raised alarm: the input going away is not evidence the danger did.
 
+**Two sources on `navigation.position` disable the anchor alarm — silently.** Not by
+false-alarming: the far source reads as *outside* the circle and the good one as *inside*,
+and since a raise needs the condition to hold continuously, the alternation resets the
+hold time for ever and the alarm never fires at all. This boat had exactly that before its
+position source was pinned — a second source a median 2.3 km away, jumping up to 22.7 km
+between fixes, while the good receiver at rest scattered a median **1.88 m** from its
+centroid (max 2.91 m over 90 minutes). So the plugin watches for positions that imply more
+than 60 kt and says so, in the log and on the status line, naming the fix: set a source
+priority for `navigation.position`. Metres of ordinary GPS scatter never trip it.
+
 **Feed staleness and clocks.** Rules are evaluated on the SignalK timestamp, so the timing
 is the data's own, not the machine's — but staleness has to be measured on wall clock (a
 dead feed is exactly a timestamp that stops moving). The two are reconciled by bounding
