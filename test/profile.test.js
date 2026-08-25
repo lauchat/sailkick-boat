@@ -118,7 +118,7 @@ test('profile: settings, active polar and the whole-profile view', async () => {
   await call(srv, 'PUT', '/api/profile/active-polar', { id: 'abc123' })
   const whole = await call(srv, 'GET', '/api/profile')
   assert.strictEqual(whole.status, 200)
-  assert.deepStrictEqual(whole.json.profile, { polars: [], activePolar: 'abc123', routes: [], settings: { units: 'metric' } })
+  assert.deepStrictEqual(whole.json.profile, { polars: [], activePolar: 'abc123', routes: [], alerts: [], settings: { units: 'metric' } })
 
   // ?section= returns just that slice
   assert.deepStrictEqual((await call(srv, 'GET', '/api/profile?section=settings')).json, { ok: true, profile: { units: 'metric' } })
@@ -223,4 +223,35 @@ test('profile: the mirror serves /api/profile locally instead of proxying it to 
 
   proxy.stop()
   await new Promise((r) => { cloud.closeAllConnections && cloud.closeAllConnections(); cloud.close(r) })
+})
+
+// Alert rules live here, next to polars and routes — boat-local and deliberately NOT
+// synced with the cloud copy, so a rule edited from ashore cannot change what the boat
+// alarms on mid-passage. lib/alerts reads this file directly.
+test('profile: alerts are a first-class section the alert engine can read back', async () => {
+  const dir = tmpDir()
+  const profile = createProfile(app, { dataDir: dir })
+  const srv = await serve(profile)
+
+  const empty = await call(srv, 'GET', '/api/profile/alerts')
+  assert.deepStrictEqual(empty.json, { ok: true, alerts: [] }, 'the key is present, not undefined')
+
+  const made = await call(srv, 'POST', '/api/profile/alerts',
+    { kind: 'anchor-drift', name: 'Anchor', anchor: { lat: 43, lon: 6 }, radiusM: 50, forSec: 60 })
+  assert.strictEqual(made.status, 201)
+  const id = made.json.item.id
+  assert.ok(id, 'gets an id like every other profile item')
+
+  const upd = await call(srv, 'PUT', `/api/profile/alerts/${id}`, { kind: 'anchor-drift', radiusM: 80, enabled: false })
+  assert.strictEqual(upd.status, 200)
+
+  // What lib/alerts actually does: read the file, not the API.
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'profile.json'), 'utf8'))
+  assert.strictEqual(onDisk.alerts.length, 1)
+  assert.strictEqual(onDisk.alerts[0].radiusM, 80)
+  assert.strictEqual(onDisk.alerts[0].enabled, false)
+
+  await call(srv, 'DELETE', `/api/profile/alerts/${id}`)
+  assert.deepStrictEqual((await call(srv, 'GET', '/api/profile/alerts')).json.alerts, [])
+  await close(srv)
 })

@@ -348,6 +348,57 @@ at all. The raw channels are always recorded regardless, so the cloud can recomp
 history if the maths ever changes: the recorded channel is a materialisation, not the only
 truth.
 
+## Alerts and alarms, evaluated on board
+
+Rules — anchor drag, wind over or under a threshold, a big wind shift, boat speed below
+polar — are evaluated **here**, in the SignalK process, against the boat's own bus. That
+is the point: the case this exists for is the anchor dragging at 3am with the phone in
+airplane mode and no uplink, which a cloud watcher cannot help with.
+
+The rule **evaluator** is vendored verbatim from the app (`shared/engine/alerts.js`, with
+its commit and sha256 in the header), exactly as the polar maths is. One definition of
+"has this rule fired", or an alarm means one thing when the boat notices and another when
+the cloud does. `test/alerts.test.js` replays the upstream suite against the vendored copy
+— flapping, wrap-around, anchor swing, data gaps — and pins the boat-side host as well.
+
+**Delivery is SignalK notifications**, which is what makes this worth more than another
+screen: an alarm panel, a chart app or a Node-RED buzzer flow already listens to them.
+
+```
+notifications.navigation.anchor    anchor drag  — state "alarm",  method visual + sound
+notifications.sailkick.<ruleId>    everything else — state "alert", method visual
+```
+
+Only anchor drag takes a conventional path: a boat has one anchor, so it cannot collide,
+and it is the rule other software reacts to. Wind rules get a path of their own per rule,
+because "over 30 kt" and "under 5 kt" are two rules a sailor plausibly sets at once, and
+one shared path would make each transition overwrite the other's state. Clearing is
+`state: "normal"`, per the schema — the path is never deleted. A rule may carry its own
+`state`/`method`, validated against the SignalK enums (`nominal|normal|alert|warn|alarm|
+emergency`, `visual|sound`).
+
+**Rules live on the boat**, in the profile beside routes and polars
+(`/api/profile/alerts`), and that copy is deliberately **not** synced with the cloud. For
+alarms that is the right way round: a rule edited from ashore must not silently change
+what the boat alarms on mid-passage.
+
+Three behaviours worth knowing, because each is a way an alarm system becomes useless:
+
+- **Editing a rule re-arms its alarm.** A rebuilt evaluator has no memory of the raise, so
+  anything currently up is taken down explicitly and comes back after its hold time if the
+  condition still holds. The alternative is a notification latched at `alarm` that nothing
+  can ever clear — which is how an owner learns to mute the path.
+- **Stopping the plugin clears what it raised**, loudly, for the same reason: nothing will
+  evaluate the rule while it is stopped.
+- **A dead feed is not an alarm.** It goes to the status line and the log. It also never
+  clears a raised alarm: the input going away is not evidence the danger did.
+
+**Feed staleness and clocks.** Rules are evaluated on the SignalK timestamp, so the timing
+is the data's own, not the machine's — but staleness has to be measured on wall clock (a
+dead feed is exactly a timestamp that stops moving). The two are reconciled by bounding
+the skew: a SignalK clock more than a minute from system time falls back to system time
+with one warning, rather than reporting a permanent phantom "feed stale".
+
 ## Two paths, one reading
 
 Source priorities solve *several devices on one path*. There is a second, separate case:
@@ -680,6 +731,8 @@ in `index.js`.
 - **Sailkick account**: `slug` (boat name), `writeToken`
 - **Telemetry sync → cloud**: `enabled`
 - **Upload AIS targets**: `enabled` (default off), `source`
+- **Alerts & alarms**: `enabled` (default on — inert until you add a rule),
+  `notifications` (whether to put alarms on the SignalK bus)
 - **Offline app & maps**: `enabled`, `proxyPort` (default 8080), `localSignalkUrl`
   (default `http://127.0.0.1:3000`), `dataDir`, `seedEnabled`, `prefetchRadiusNm`,
   `prefetchDetailZoom`

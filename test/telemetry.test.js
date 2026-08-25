@@ -192,21 +192,38 @@ test('maps true wind angle, VMG, sea/air temperature and engine revolutions', ()
 // an ES module. Skipped (not failed) when the app source isn't present, so npm-only
 // checkouts still pass.
 const fs = require('node:fs')
-const APP_MAP = process.env.SAILKICK_APP_REPO
-  ? `${process.env.SAILKICK_APP_REPO}/public/engine/signalk-map.js`
-  : '/workspace/sailkick/public/engine/signalk-map.js'
+const APP_REPO = process.env.SAILKICK_APP_REPO || '/workspace/sailkick'
+const APP_MAP = `${APP_REPO}/shared/engine/signalk-map.js`
 
-test('contract seam: our mapper produces every BoatState field the app\'s does', { skip: !fs.existsSync(APP_MAP) && 'app source not checked out' }, () => {
+// The skip has to distinguish "the app isn't checked out" from "the file moved" — and it
+// could not. When the app moved signalk-map.js public/engine → shared/engine (app 8fd58cf)
+// both seam tests started reporting "app source not checked out" and passed. The guard
+// against the failure that has already happened twice vanished at exactly the moment the
+// file it guards was touched.
+//
+// So: skip ONLY when the checkout itself is absent. If the repo is there and the file is
+// not, that is a moved contract and the test FAILS with the path it looked for.
+const APP_PRESENT = fs.existsSync(APP_REPO)
+const seamSkip = APP_PRESENT ? false : 'app source not checked out'
+const appMap = () => {
+  assert.ok(fs.existsSync(APP_MAP),
+    `the app is checked out at ${APP_REPO} but ${APP_MAP} is missing — the app moved or renamed ` +
+    'its signalk-map.js. Update APP_MAP here, lib/telemetry/contract.js and the vendored header, ' +
+    'then re-check the hash; do not let this test skip.')
+  return fs.readFileSync(APP_MAP, 'utf8')
+}
+
+test('contract seam: our mapper produces every BoatState field the app\'s does', { skip: seamSkip }, () => {
   const fields = (src) => new Set([...src.matchAll(/patch\.([A-Za-z]+)\s*=/g)].map((m) => m[1]))
-  const theirs = fields(fs.readFileSync(APP_MAP, 'utf8'))
+  const theirs = fields(appMap())
   const ours = fields(fs.readFileSync(require.resolve('../lib/telemetry/signalk-map'), 'utf8'))
   const missing = [...theirs].filter((f) => !ours.has(f)).sort()
   assert.deepStrictEqual(missing, [], 'fields the app sets and we never emit — re-port lib/telemetry/signalk-map.js')
 })
 
-test('contract seam: the pinned app hash matches the app source we ported from', { skip: !fs.existsSync(APP_MAP) && 'app source not checked out' }, () => {
+test('contract seam: the pinned app hash matches the app source we ported from', { skip: seamSkip }, () => {
   const { PINNED_APP_HASH } = require('../lib/telemetry/contract')
-  const actual = crypto.createHash('sha256').update(fs.readFileSync(APP_MAP)).digest('hex').slice(0, 12)
+  const actual = crypto.createHash('sha256').update(appMap()).digest('hex').slice(0, 12)
   assert.strictEqual(actual, PINNED_APP_HASH,
     'the app\'s signalk-map.js changed since we ported it — re-port, then update PINNED_APP_HASH in lib/telemetry/contract.js')
 })

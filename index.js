@@ -11,6 +11,7 @@ const { createAis } = require('./lib/ais')
 const { createAisTargets } = require('./lib/ais/targets')
 const { createProfile } = require('./lib/profile')
 const { createPerf } = require('./lib/perf')
+const { createAlerts } = require('./lib/alerts')
 const { createCloud } = require('./lib/cloud')
 const { resolveAccountConfig } = require('./lib/account')
 
@@ -107,6 +108,7 @@ module.exports = function (app) {
   let profile = null
   let cloud = null
   let perf = null
+  let alerts = null
   let proxyPort = null // what the launcher page needs to build its links
   let pairedSlug = null
   let statusTimer = null
@@ -163,6 +165,15 @@ module.exports = function (app) {
           sourceUrl: { type: 'string', title: '…local InfluxDB URL', default: 'http://127.0.0.1:8086' },
           sourceOrg: { type: 'string', title: '…organization', default: 'signalk' },
           sourceBucket: { type: 'string', title: '…bucket', default: 'signalk' }
+        }
+      },
+      alerts: {
+        type: 'object',
+        title: 'Alerts & alarms',
+        description: 'Watch this boat\'s own data and raise SignalK notifications — anchor drag, wind over or under a threshold, a big wind shift, speed below polar. Evaluated here on board, so an anchor alarm still works with the phone in airplane mode and no internet. The rules themselves are set in the app (they are stored on the boat, not in the cloud); nothing is raised until you add one.',
+        properties: {
+          enabled: { type: 'boolean', title: 'Evaluate alert rules', default: true },
+          notifications: { type: 'boolean', title: 'Raise SignalK notifications', description: 'Puts alarms on the SignalK bus, where chart apps, alarm panels and buzzers pick them up (anchor drag goes to the conventional notifications.navigation.anchor). Turn off to evaluate rules without touching the bus.', default: true }
         }
       },
       proxy: {
@@ -383,6 +394,25 @@ module.exports = function (app) {
         }
       }
 
+      // Alert rules, evaluated on board. After perf, because perf-below reads the polar %
+      // it computes; needs telemetry for everything else. Inert until the owner adds a
+      // rule, so it is on by default.
+      if (telemetry && (opts.alerts || {}).enabled !== false) {
+        try {
+          alerts = createAlerts(app, {
+            source: telemetry,
+            perfSource: perf,
+            pluginId: plugin.id,
+            notifications: (opts.alerts || {}).notifications !== false,
+            profileFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'profile.json')
+          })
+          alerts.start()
+        } catch (e) {
+          (app.error || console.error)('[sailkick-boat] alerts start failed: ' + e.message)
+          alerts = null
+        }
+      }
+
       if (pOpts.history.enabled !== false) {
         try {
           // ringSource = the telemetry module: when no local InfluxDB token is set
@@ -487,6 +517,7 @@ module.exports = function (app) {
     if (aisTargets) parts.push(aisTargets.status())
     if (profile) parts.push(profile.status())
     if (perf) parts.push(perf.status())
+    if (alerts) parts.push(alerts.status())
     if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
@@ -502,6 +533,7 @@ module.exports = function (app) {
     try { if (profile) profile.stop() } catch {}
     try { if (cloud) cloud.stop() } catch {}
     try { if (perf) perf.stop() } catch {}
+    try { if (alerts) alerts.stop() } catch {}
     try { if (ais) ais.stop() } catch {}
     try { if (backfill) backfill.stop() } catch {}
     try { if (proxy) proxy.stop() } catch {}
@@ -514,6 +546,7 @@ module.exports = function (app) {
     profile = null
     cloud = null
     perf = null
+    alerts = null
     proxyPort = null
     pairedSlug = null
     proxy = null
