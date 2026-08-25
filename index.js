@@ -407,6 +407,7 @@ module.exports = function (app) {
             profileFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'profile.json')
           })
           alerts.start()
+          pOpts.alerts = alerts // so /api/config can say the rules are evaluated here
         } catch (e) {
           (app.error || console.error)('[sailkick-boat] alerts start failed: ' + e.message)
           alerts = null

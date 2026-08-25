@@ -364,42 +364,88 @@ test('host: no rules is a quiet, valid state', () => {
 })
 
 test('host: two sources fighting over the position are called out, because that alarm cannot fire', () => {
-  // Measured on this boat before navigation.position was pinned: a second source a median
-  // 2.3 km away, jumping up to 22.7 km fix-to-fix. The engine does not false-alarm on
-  // that — it does something worse. The far source reads "outside", the good one
-  // "inside", and a raise needs the condition to hold continuously, so the alternation
-  // resets the hold for ever and the anchor alarm silently never fires.
+  // Detection now lives in the vendored evaluator (three jumps over MAX_PLAUSIBLE_KT
+  // within five minutes); what is tested here is that the host surfaces its verdict.
+  // Reproduces what this boat actually had: alternating fixes ~2.3 km apart.
   const h = host([ANCHOR])
-  h.feed({ lat: 43.0, lon: 6.0 }, 30)
-  h.feed({ lat: 43.05, lon: 6.05 }, 25) // ~6.6 km away, 5 s later
-  h.feed({ lat: 43.0, lon: 6.0 }, 20)
-  assert.ok(h.a._jumps() >= 2, `counted the jumps (${h.a._jumps()})`)
+  for (let i = 0; i < 12; i++) h.feed({ lat: i % 2 ? 43.0 : 43.0207, lon: 6.0 }, 40 - i)
+  assert.ok(h.a._jumpy(), 'the conflict is recognised')
   assert.match(h.a.status(), /position is JUMPING between sources/)
   assert.ok(h.logs.some((m) => /more than one source is publishing navigation\.position/.test(m)),
     'and names the fix: pin the source')
   assert.strictEqual(h.logs.filter((m) => /more than one source/.test(m)).length, 1, 'said once, not per fix')
+  assert.ok(!h.a.active().includes('a1'), 'and the anchor rule indeed never fired — the silent failure')
   h.a.stop()
 })
 
-test('host: real GPS scatter at rest is never mistaken for a jump', () => {
+test('host: real GPS scatter at rest is never mistaken for a source conflict', () => {
   // The actual receiver on this boat, at rest for 90 min: median 1.88 m from the centroid,
-  // max 2.91 m, fix-to-fix max 1.28 m. Nothing at that scale may trip the jump guard, or
-  // the warning becomes noise and gets ignored.
+  // max 2.91 m, fix-to-fix max 1.28 m. Nothing at that scale may trip it, or the warning
+  // becomes noise and gets ignored.
   const h = host([ANCHOR])
   for (let i = 0; i < 20; i++) {
     h.feed({ lat: 43.0 + (i % 3 - 1) * 0.000018, lon: 6.0 + (i % 2 ? 0.000018 : -0.000018) }, 30 - i)
   }
-  assert.strictEqual(h.a._jumps(), 0, 'metres of scatter are not a source conflict')
+  assert.ok(!h.a._jumpy(), 'metres of scatter are not a source conflict')
   assert.match(h.a.status(), /none raised/)
   h.a.stop()
 })
 
-test('host: a boat sailing fast is not a jump either', () => {
-  const h = host([ANCHOR])
-  // 12 kt for 5 s ~ 31 m. Well over MIN_JUMP_M would need 100 m in 5 s = 39 kt.
-  h.feed({ lat: 43.0, lon: 6.0 }, 40)
-  h.feed({ lat: 43.00028, lon: 6.0 }, 35)
-  h.feed({ lat: 43.00056, lon: 6.0 }, 30)
-  assert.strictEqual(h.a._jumps(), 0)
+test('host: an invalid rule is dropped and named, not left looking armed', () => {
+  // Validated with the app's own validateRule, vendored. A deadband on the wrong side of
+  // the threshold is the subtle one: the alarm could never clear, and the evaluator would
+  // treat the rule as inert while it sat in the list looking active.
+  const h = host([
+    { id: 'bad1', kind: 'wind-above', twsKt: 25, clearKt: 30, name: 'Gale' },
+    { id: 'bad2', kind: 'no-such-kind' },
+    WIND_HI
+  ])
+  assert.strictEqual(h.a._invalid(), 2, 'both bad rules dropped')
+  assert.match(h.a.status(), /2 INVALID rule\(s\) ignored/)
+  assert.ok(h.logs.some((m) => /"Gale" is NOT being evaluated.*can never clear/s.test(m)), 'says which, and why')
+  h.feed({ twsKt: 30 }, 10)
+  assert.ok(h.last(nsPath('w1')), 'the valid rule still works')
   h.a.stop()
+})
+
+test('alerts: POSITION SOURCE CONFLICT — the hazard that makes an anchor watch never fire', () => {
+  // Upstream [8], replayed. This case came from this repo's own measurements.
+  const rule = { id: 'a', kind: 'anchor-drift', anchor: { lat: 43, lon: 6 }, radiusM: 30, forSec: 60 }
+  const e = createAlertEngine([rule])
+  let t = T0
+  for (let i = 0; i < 40; i++) { e.update({ lat: i % 2 ? 43.0 : 43.0207, lon: 6 }, t); t += 1000 }
+  assert.ok(!e.isRaised('a'), 'the anchor rule indeed never fires (the silent failure)')
+  const jumpy = e.tick(t).find((x) => x.kind === 'position-jumpy')
+  assert.strictEqual(jumpy && jumpy.transition, 'raised', 'but the feed reports the conflict')
+  assert.ok(jumpy.context.jumps >= 3, 'with how many impossible jumps it saw')
+  assert.ok(e.active.includes('__feed__'), 'active() surfaces it')
+
+  const g = createAlertEngine([rule])
+  let gt = T0
+  for (let i = 0; i < 20; i++) { g.update({ lat: i === 5 ? 44 : 43.0001, lon: 6 }, gt); gt += 1000 }
+  assert.ok(!g.tick(gt).some((x) => x.kind === 'position-jumpy'), 'one lone glitch does not cry conflict')
+
+  const sail = createAlertEngine([rule])
+  let st = T0
+  for (let i = 0; i < 60; i++) { sail.update({ lat: 43 + i * 0.00028, lon: 6 }, st); st += 60000 }
+  assert.ok(!sail.tick(st).some((x) => x.kind === 'position-jumpy'), 'normal sailing never trips it')
+})
+
+test('alerts: the TWO CLOCKS contract — the trap that hides a dead feed', () => {
+  // Upstream [9], and the bug this host actually had: pass the SAMPLE stamp to tick() and
+  // a frozen feed looks fresh for ever, because the stamp stops advancing with the data.
+  const e = createAlertEngine([{ id: 'w', kind: 'wind-above', twsKt: 25, forSec: 0 }])
+  e.update({ twsKt: 30 }, T0)
+  assert.strictEqual(e.tick(T0).length, 0, 'sample clock into tick() ⇒ staleness can never fire')
+  assert.ok(e.tick(T0 + 200000).some((x) => x.kind === 'feed-stale'), 'wall clock into tick() ⇒ it does')
+})
+
+test('alerts: validateRule rejects what would sit in the list doing nothing', () => {
+  const { validateRule, RULE_KINDS } = require('../lib/alerts/alerts')
+  assert.ok(validateRule({ kind: 'wind-above', twsKt: 25 }).ok)
+  assert.match(validateRule({ kind: 'wind-above', twsKt: 25, clearKt: 30 }).error, /can never clear/)
+  assert.match(validateRule({ kind: 'nope' }).error, /unknown kind/)
+  assert.match(validateRule({ kind: 'anchor-drift', radiusM: 1 }).error, /between 5 and 5000/)
+  assert.match(validateRule({ kind: 'anchor-drift', radiusM: 50, anchor: { lat: 200, lon: 0 } }).error, /anchor must be/)
+  assert.ok(RULE_KINDS.includes('anchor-drift') && RULE_KINDS.length === 5)
 })

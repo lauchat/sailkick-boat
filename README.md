@@ -359,7 +359,8 @@ The rule **evaluator** is vendored verbatim from the app (`shared/engine/alerts.
 its commit and sha256 in the header), exactly as the polar maths is. One definition of
 "has this rule fired", or an alarm means one thing when the boat notices and another when
 the cloud does. `test/alerts.test.js` replays the upstream suite against the vendored copy
-— flapping, wrap-around, anchor swing, data gaps — and pins the boat-side host as well.
+— flapping, wrap-around, anchor swing, data gaps, the position-source conflict and the
+two-clocks contract — and pins the boat-side host as well.
 
 **Delivery is SignalK notifications**, which is what makes this worth more than another
 screen: an alarm panel, a chart app or a Node-RED buzzer flow already listens to them.
@@ -399,9 +400,16 @@ and since a raise needs the condition to hold continuously, the alternation rese
 hold time for ever and the alarm never fires at all. This boat had exactly that before its
 position source was pinned — a second source a median 2.3 km away, jumping up to 22.7 km
 between fixes, while the good receiver at rest scattered a median **1.88 m** from its
-centroid (max 2.91 m over 90 minutes). So the plugin watches for positions that imply more
-than 60 kt and says so, in the log and on the status line, naming the fix: set a source
-priority for `navigation.position`. Metres of ordinary GPS scatter never trip it.
+centroid (max 2.91 m over 90 minutes). The evaluator now reports it as a feed condition
+(three implausible jumps in five minutes), and the plugin says so in the log and on the
+status line, naming the fix: set a source priority for `navigation.position`. Metres of
+ordinary GPS scatter never trip it.
+
+**A malformed rule is dropped, not stored looking armed.** Rules are validated with the
+app's own `validateRule` (vendored with the evaluator), because the evaluator treats an
+unknown kind — or a deadband on the wrong side of the threshold, which could never clear —
+as *inert*. Such a rule would otherwise sit in the list looking active and never fire. The
+status line counts them and the log names each one and why.
 
 **Feed staleness and clocks.** Rules are evaluated on the SignalK timestamp, so the timing
 is the data's own, not the machine's — but staleness has to be measured on wall clock (a

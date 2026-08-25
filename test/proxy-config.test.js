@@ -215,3 +215,32 @@ test('perfKey is the bucket minus its _raw suffix, for UUID and legacy slug alik
   assert.strictEqual(derive(''), null, 'unpaired')
   assert.strictEqual(derive('weird_raw_raw'), 'weird_raw', 'only the trailing suffix goes')
 })
+
+// The app's Alerts pane shows an amber "these rules are not being evaluated" banner unless
+// a host claims them — rules stored with nothing watching them is exactly what it warns
+// about. When lib/alerts is running, this plugin IS that host.
+test('serveConfig: claims alertsEvaluatedHere when the alert engine is running here', async () => {
+  const { createAlerts } = require('../lib/alerts')
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-cfg-alerts-'))
+  const profileFile = path.join(dir, 'profile.json')
+  fs.writeFileSync(profileFile, JSON.stringify({ alerts: [] }))
+  const alerts = createAlerts(app, { source: { getState: () => ({ lat: 1, lon: 2 }) }, profileFile })
+  alerts.start()
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, alerts, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy.start()
+  const proxy2 = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy2.start()
+  // finally, not fall-through: a failed assertion used to skip the teardown and leave the
+  // servers listening, which hangs the whole run instead of failing one test. That is the
+  // same trap that made test/history.test.js hang the suite.
+  try {
+    assert.strictEqual(alerts.available(), true)
+    assert.strictEqual(JSON.parse((await callConfig(proxy)).body).alertsEvaluatedHere, true)
+    // …and no claim when the engine is off, or the pane would hide a real warning.
+    assert.strictEqual(JSON.parse((await callConfig(proxy2)).body).alertsEvaluatedHere, undefined,
+      'no engine ⇒ no claim, so the app keeps warning')
+  } finally {
+    proxy.stop(); proxy2.stop(); alerts.stop(); up.close()
+  }
+})
