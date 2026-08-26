@@ -432,12 +432,51 @@ test('alerts: POSITION SOURCE CONFLICT — the hazard that makes an anchor watch
 })
 
 test('alerts: the TWO CLOCKS contract — the trap that hides a dead feed', () => {
-  // Upstream [9], and the bug this host actually had: pass the SAMPLE stamp to tick() and
-  // a frozen feed looks fresh for ever, because the stamp stops advancing with the data.
-  const e = createAlertEngine([{ id: 'w', kind: 'wind-above', twsKt: 25, forSec: 0 }])
+  // Upstream [9], strengthened after review. Simulates a dead feed as a host actually
+  // experiences it: getState() keeps returning the same state, so its stamp never
+  // advances, while real time runs on. The two loops are identical except for which clock
+  // goes into tick() — so this discriminates a broken host rather than merely describing
+  // the contract. This host HAD the bug; its own stale test caught it.
+  const mk = () => createAlertEngine([{ id: 'w', kind: 'wind-above', twsKt: 25, forSec: 0 }])
+  const FROZEN = T0
+  const STEP = 30000; const TICKS = 30 // 15 minutes of real time, far past STALE_SEC
+
+  const buggy = []
+  const b = mk()
+  for (let i = 0; i < TICKS; i++) {
+    b.update({ twsKt: 30 }, FROZEN) // same sample, same stamp — nothing is arriving
+    buggy.push(...b.tick(FROZEN)) // THE BUG: sample stamp into tick()
+  }
+  assert.strictEqual(buggy.length, 0, 'a host ticking with the SAMPLE stamp never notices the feed died')
+
+  const right = []
+  const g = mk()
+  let wall = T0
+  for (let i = 0; i < TICKS; i++) {
+    g.update({ twsKt: 30 }, FROZEN) // identical dead feed…
+    wall += STEP
+    right.push(...g.tick(wall)) // …ticked with the WALL CLOCK
+  }
+  assert.ok(right.some((x) => x.kind === 'feed-stale' && x.transition === 'raised'),
+    'the same feed, ticked with the wall clock, is reported dead')
+  assert.strictEqual(right.filter((x) => x.kind === 'feed-stale').length, 1, 'reported once, not every tick')
+  g.update({ twsKt: 30 }, wall) // a fresh sample, stamped now
+  assert.ok(g.tick(wall + 1000).some((x) => x.kind === 'feed-stale' && x.transition === 'cleared'),
+    'it clears when data genuinely resumes')
+})
+
+test('alerts: staleSec is configurable — the cloud heartbeat watches minutes, not seconds', () => {
+  // New second argument at d54bfc1. The boat leaves it at the default; this pins that our
+  // vendored copy carries the option, since a host that silently ignored it would watch
+  // the wrong window.
+  const e = createAlertEngine([{ id: 'w', kind: 'wind-above', twsKt: 25, forSec: 0 }], { staleSec: 5 })
   e.update({ twsKt: 30 }, T0)
-  assert.strictEqual(e.tick(T0).length, 0, 'sample clock into tick() ⇒ staleness can never fire')
-  assert.ok(e.tick(T0 + 200000).some((x) => x.kind === 'feed-stale'), 'wall clock into tick() ⇒ it does')
+  assert.strictEqual(e.tick(T0 + 4000).length, 0, 'not yet')
+  assert.ok(e.tick(T0 + 6000).some((x) => x.kind === 'feed-stale'), 'stale after the configured 5s')
+  const dflt = createAlertEngine([{ id: 'w', kind: 'wind-above', twsKt: 25, forSec: 0 }])
+  dflt.update({ twsKt: 30 }, T0)
+  assert.strictEqual(dflt.tick(T0 + 6000).length, 0, 'and the default is still STALE_SEC')
+  assert.strictEqual(STALE_SEC, 120)
 })
 
 test('alerts: validateRule rejects what would sit in the list doing nothing', () => {
@@ -448,4 +487,193 @@ test('alerts: validateRule rejects what would sit in the list doing nothing', ()
   assert.match(validateRule({ kind: 'anchor-drift', radiusM: 1 }).error, /between 5 and 5000/)
   assert.match(validateRule({ kind: 'anchor-drift', radiusM: 50, anchor: { lat: 200, lon: 0 } }).error, /anchor must be/)
   assert.ok(RULE_KINDS.includes('anchor-drift') && RULE_KINDS.length === 5)
+})
+
+// ---------- 3. the relay: alarms reaching a phone ashore ----------
+// The transitions ride lib/sync's store-and-forward spool as Influx line protocol, so
+// they inherit its guarantees (ordered, gapless across an offline passage, nothing lost
+// on a restart) instead of needing a second, weaker delivery path. relay.js documents the
+// schema; these pin it, because the cloud reader is written against it in another repo.
+
+const { eventToLine, MEASUREMENT } = require('../lib/alerts/relay')
+
+const parse = (line) => {
+  // measurement,tagset fieldset ns — fields may contain escaped quotes and spaces, so
+  // split on the LAST space and the first unquoted one.
+  const ns = line.slice(line.lastIndexOf(' ') + 1)
+  const head = line.slice(0, line.lastIndexOf(' '))
+  const cut = head.indexOf(' ')
+  const [meas, ...tagParts] = head.slice(0, cut).split(',')
+  const tags = Object.fromEntries(tagParts.map((t) => t.split('=')))
+  const fields = {}
+  for (const m of head.slice(cut + 1).matchAll(/([a-zA-Z_]+)=("(?:[^"\\]|\\.)*"|[^,]+)/g)) {
+    fields[m[1]] = m[2].startsWith('"') ? m[2].slice(1, -1).replace(/\\(.)/g, '$1') : m[2]
+  }
+  return { meas, tags, fields, ns }
+}
+
+test('relay: a raise becomes one line whose series key is the rule, not its state', () => {
+  const ev = {
+    ruleId: 'a1',
+    kind: 'anchor-drift',
+    transition: 'raised',
+    at: 1700000000123,
+    context: { value: 111, rule: { id: 'a1', name: 'Anchor', radiusM: 50 } }
+  }
+  const p = parse(eventToLine(ev, { context: 'vessels.urn:mrn:imo:mmsi:269118770', state: 'alarm', message: 'Anchor — anchor drag: 111 m from the datum (limit 50 m)' }))
+  assert.strictEqual(p.meas, MEASUREMENT)
+  assert.deepStrictEqual(p.tags, {
+    context: 'vessels.urn:mrn:imo:mmsi:269118770', self: 'true', rule: 'a1', kind: 'anchor-drift'
+  }, 'tags are bounded and stable — transition and state are NOT among them')
+  assert.strictEqual(p.fields.raised, '1i', 'machine-readable state: last(raised)==1 is "raised now"')
+  assert.strictEqual(p.fields.transition, 'raised')
+  assert.strictEqual(p.fields.state, 'alarm', 'the severity actually emitted, so delivery can decide to wake someone')
+  assert.strictEqual(p.fields.value, '111', 'the tripping value stays numeric and chartable')
+  assert.match(p.fields.message, /111 m from the datum/)
+  assert.strictEqual(p.fields.name, 'Anchor')
+  assert.strictEqual(p.ns, '1700000000123000000', 'nanoseconds, so a replayed batch overwrites rather than duplicates')
+})
+
+test('relay: raise and clear land on the SAME series, so one query answers "is it up?"', () => {
+  const base = { ruleId: 'a1', kind: 'anchor-drift', at: 1700000000000, context: { value: 10, rule: {} } }
+  const up = parse(eventToLine({ ...base, transition: 'raised' }, {}))
+  const down = parse(eventToLine({ ...base, at: base.at + 60000, transition: 'cleared' }, {}))
+  assert.deepStrictEqual(up.tags, down.tags,
+    'identical tag set: as tags, transition would split each rule across two series and ' +
+    '"is it raised" would become a merge-and-compare, wrong in the direction of "no alarm"')
+  assert.strictEqual(down.fields.raised, '0i')
+})
+
+test('relay: commas, spaces and quotes in a rule name or message cannot break the line', () => {
+  const line = eventToLine({
+    ruleId: 'r,1 x',
+    kind: 'wind-above',
+    transition: 'raised',
+    at: 1700000000000,
+    context: { value: 31.5, rule: { name: 'Gale, "big" one\\here' } }
+  }, { state: 'alert', message: 'wind 31.5 kt (over 25 kt), gusting' })
+  // Asserted on the raw line: a tag value containing an escaped comma is precisely what a
+  // naive split-on-comma parser gets wrong, so parsing it here would test the test.
+  assert.match(line, /,rule=r\\,1\\ x,kind=wind-above /, 'tag escaping')
+  const p = parse(line.replace('r\\,1\\ x', 'rid'))
+  assert.match(line, /name="Gale, \\"big\\" one\\\\here"/, 'quotes and backslashes escaped in fields')
+  assert.strictEqual(p.fields.value, '31.5')
+})
+
+test('relay: feed conditions ride the same measurement under the engine\'s own __feed__ id', () => {
+  const p = parse(eventToLine({
+    ruleId: '__feed__', kind: 'position-jumpy', transition: 'raised', at: 1700000000000,
+    context: { jumps: 4, overKt: 100 }
+  }, { state: 'warn', message: 'position source conflict' }))
+  assert.strictEqual(p.tags.rule, '__feed__')
+  assert.strictEqual(p.tags.kind, 'position-jumpy')
+  assert.strictEqual(p.fields.jumps, '4i')
+  assert.strictEqual(p.fields.state, 'warn')
+})
+
+test('relay: a malformed event produces nothing rather than a line Influx will reject', () => {
+  // A rejected batch is quarantined by the spool, and quarantining an alarm is worse than
+  // not recording it.
+  assert.strictEqual(eventToLine(null, {}), null)
+  assert.strictEqual(eventToLine({ kind: 'wind-above', transition: 'raised' }, {}), null, 'no ruleId')
+  assert.strictEqual(eventToLine({ ruleId: 'x', kind: 'wind-above' }, {}), null, 'no transition')
+  assert.strictEqual(eventToLine({ ruleId: 'x', transition: 'raised', at: 'not a date' }, {}), null, 'unparseable time')
+})
+
+test('host: alarms are handed to the spool as they happen, raise and clear', () => {
+  const sent = []
+  const h = host([ANCHOR], { relay: (lines) => { sent.push(...lines); return true } })
+  h.feed({ lat: 43.0, lon: 6.0 }, 30)
+  h.feed({ lat: 43.001, lon: 6.0 }, 20)
+  h.feed({ lat: 43.0, lon: 6.0 }, 10)
+  assert.strictEqual(sent.length, 2, 'one line per transition, not per tick')
+  assert.match(sent[0], /^alerts,.*rule=a1,kind=anchor-drift raised=1i/)
+  assert.match(sent[1], /raised=0i/)
+  assert.ok(h.a.status().includes('2 sent to the cloud'))
+  h.a.stop()
+})
+
+test('host: with no cloud sync, alarms still ring on board and the status line says so', () => {
+  // The failure that must not happen quietly: believing an alarm reached a phone ashore.
+  const h = host([ANCHOR]) // no relay wired
+  h.feed({ lat: 43.001, lon: 6.0 }, 10)
+  assert.ok(h.last(ANCHOR_PATH), 'the alarm still rings on the boat')
+  assert.match(h.a.status(), /local only \(no cloud sync\)/)
+  assert.ok(h.logs.some((m) => /not sent to the cloud/.test(m)))
+  h.a.stop()
+})
+
+test('host: a relay that throws does not stop the alarm ringing', () => {
+  const h = host([ANCHOR], { relay: () => { throw new Error('spool is full') } })
+  h.feed({ lat: 43.001, lon: 6.0 }, 10)
+  assert.strictEqual(h.last(ANCHOR_PATH).value.state, 'alarm', 'the bus still got it')
+  assert.ok(h.logs.some((m) => /could not relay the alarm/.test(m)))
+  h.a.stop()
+})
+
+// ---------- 4. drop anchor ----------
+// The datum has to survive a restart and a rule edit — both of which happen at anchor —
+// so it is written into the RULE, not only into the engine's memory. And it is taken from
+// the boat's own fix, because that is the position the rule will be evaluated against; a
+// browser would send whatever its last telemetry frame said, from a socket that may have
+// dropped, which is exactly the moment this matters.
+const { createProfile } = require('../lib/profile')
+
+function anchorHarness (rule) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sk-drop-${process.pid}-${seq++}-`))
+  fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ alerts: [rule] }, null, 2))
+  const app = { debug () {}, error () {}, handleMessage () {} }
+  const profile = createProfile(app, { dataDir: dir })
+  let state = { lat: 43.5, lon: 6.5, updatedAt: new Date().toISOString() }
+  const a = createAlerts(app, {
+    source: { getState: () => state },
+    profile,
+    profileFile: path.join(dir, 'profile.json')
+  })
+  a.start()
+  return { a, profile, dir, setState: (s) => { state = s } }
+}
+
+test('drop anchor: writes the datum into the rule and arms the watch immediately', async () => {
+  const h = anchorHarness({ id: 'a1', kind: 'anchor-drift', radiusM: 50, forSec: 0, clearSec: 0, name: 'Anchor' })
+  const r = await h.a.dropAnchor({ ruleId: 'a1' })
+  assert.strictEqual(r.ok, true)
+  assert.strictEqual(r.anchor.lat, 43.5, "the boat's own fix, not one the caller supplied")
+
+  const onDisk = JSON.parse(fs.readFileSync(path.join(h.dir, 'profile.json'), 'utf8'))
+  assert.deepStrictEqual(onDisk.alerts[0].anchor, { lat: 43.5, lon: 6.5 }, 'durable: survives a restart')
+  // Armed now, not at the next rules reload: 111 m away must already be a drag.
+  h.setState({ lat: 43.501, lon: 6.5, updatedAt: new Date().toISOString() })
+  h.a._tick()
+  assert.ok(h.a.active().includes('a1'), 'the watch was live from the moment it was set')
+  h.a.stop()
+})
+
+test('drop anchor: refuses clearly rather than pretending the watch is set', async () => {
+  const h = anchorHarness({ id: 'a1', kind: 'anchor-drift', radiusM: 50, forSec: 0 })
+  assert.strictEqual((await h.a.dropAnchor({ ruleId: 'nope' })).status, 404)
+  assert.strictEqual((await h.a.dropAnchor({})).status, 404)
+  h.a.stop()
+
+  const w = anchorHarness({ id: 'w1', kind: 'wind-above', twsKt: 25, forSec: 0 })
+  const wrong = await w.a.dropAnchor({ ruleId: 'w1' })
+  assert.strictEqual(wrong.status, 400)
+  assert.match(wrong.message, /not an anchor watch/)
+  w.a.stop()
+
+  const n = anchorHarness({ id: 'a1', kind: 'anchor-drift', radiusM: 50, forSec: 0 })
+  n.setState({ updatedAt: new Date().toISOString() }) // no fix
+  const none = await n.a.dropAnchor({ ruleId: 'a1' })
+  assert.strictEqual(none.status, 409)
+  assert.match(none.message, /no position fix/)
+  n.a.stop()
+})
+
+test('drop anchor: an explicit position is honoured (re-setting the datum by hand)', async () => {
+  const h = anchorHarness({ id: 'a1', kind: 'anchor-drift', radiusM: 50, forSec: 0 })
+  const r = await h.a.dropAnchor({ ruleId: 'a1', lat: 40.1, lon: -3.2 })
+  assert.deepStrictEqual(r.anchor, { lat: 40.1, lon: -3.2 })
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(h.dir, 'profile.json'), 'utf8')).alerts[0].anchor,
+    { lat: 40.1, lon: -3.2 })
+  h.a.stop()
 })

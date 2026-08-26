@@ -250,6 +250,9 @@ module.exports = function (app) {
         bucket: b.bucket || s.bucket,
         token: b.writeToken || s.token,
         spoolDir,
+        // So sync can tell OUR notifications from every other plugin's: ours are relayed
+        // as `alerts` rows and must not also go up flattened (lib/sync ownNotificationsStripped).
+        pluginId: plugin.id,
         batchSize: s.batchSize || SYNC_TUNING.batchSize,
         flushIntervalMs: s.flushIntervalMs || SYNC_TUNING.flushIntervalMs,
         maxBufferBytes: s.maxBufferBytes || SYNC_TUNING.maxBufferBytes,
@@ -404,6 +407,14 @@ module.exports = function (app) {
             perfSource: perf,
             pluginId: plugin.id,
             notifications: (opts.alerts || {}).notifications !== false,
+            // The cloud half: transitions ride the telemetry spool as `alerts` rows, so an
+            // alarm raised offshore arrives when the link does instead of being lost.
+            // Null when sync is off — alarms then ring on board only, and say so.
+            relay: sync ? (lines) => sync.writeLines(lines) : null,
+            context: app.selfContext || ('vessels.' + (app.selfId || 'self')),
+            // For "drop anchor": the datum is written into the rule through the profile's
+            // own serialized queue, so it survives a restart and cannot race an app save.
+            profile,
             profileFile: path.join((app.getDataDirPath && app.getDataDirPath()) || '.', 'profile.json')
           })
           alerts.start()

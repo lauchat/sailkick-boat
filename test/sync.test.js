@@ -259,3 +259,77 @@ test('sync: rebuilds the pool after repeated transport failures, then recovers',
   srv.closeAllConnections && srv.closeAllConnections()
   await new Promise((r) => srv.close(r))
 })
+
+// --- the alarm relay's half of the spool (v0.27.0) ----------------------------------
+// lib/alerts puts alarm transitions through THIS pipe rather than opening a second one:
+// they then inherit store-and-forward, so an alarm raised mid-ocean arrives when the link
+// does, in order, instead of being lost the moment a POST fails.
+function spoolHarness () {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-relay-'))
+  const spoolDir = path.join(dir, 'spool')
+  let handler = null
+  const app = {
+    selfId: 'urn:mrn:test',
+    getDataDirPath: () => dir,
+    debug: () => {},
+    subscriptionmanager: { subscribe: (sub, unsub, err, cb) => { handler = cb } }
+  }
+  const s = createSync(app, {
+    influxUrl: 'http://127.0.0.1:9', org: 'o', bucket: 'b', token: 't', pluginId: 'sailkick-boat',
+    spoolDir, flushIntervalMs: 100, retryMinMs: 100, retryMaxMs: 200
+  })
+  s.start()
+  const spooled = () => fs.readdirSync(spoolDir).filter((f) => f.endsWith('.lp'))
+    .map((f) => fs.readFileSync(path.join(spoolDir, f), 'utf8')).join('')
+  return { s, spoolDir, spooled, deliver: (d) => handler(d), ready: async () => { for (let i = 0; i < 60 && !handler; i++) await delay(20) } }
+}
+
+test('sync: writeLines puts caller-built rows through the same durable spool', async () => {
+  const h = spoolHarness(); await h.ready()
+  // finally, not fall-through: a failed assertion would otherwise skip stop() and leave
+  // this sync's timers running, hanging the whole file instead of failing one test.
+  try {
+    assert.strictEqual(h.s.writeLines(['alerts,rule=a1,kind=anchor-drift raised=1i 1700000000000000000']), true)
+    await delay(300)
+    assert.match(h.spooled(), /alerts,rule=a1,kind=anchor-drift raised=1i/, 'on disk, so a failed upload does not lose it')
+    assert.strictEqual(h.s.writeLines([]), false, 'nothing to write is not a write')
+    assert.strictEqual(h.s.writeLines(null), false)
+  } finally { h.s.stop() }
+})
+
+test('sync: writeLines reports false when sync was never configured, so alarms can say "local only"', () => {
+  const s = createSync({ debug: () => {} }, {}) // no url/bucket/token
+  s.start()
+  assert.strictEqual(s.writeLines(['alerts,rule=x raised=1i 1']), false,
+    'the caller must be able to tell the owner the alarm did not leave the boat')
+  s.stop()
+})
+
+test('sync: our OWN notifications do not also go up as flattened notifications.* rows', async () => {
+  // They are relayed as `alerts` rows, which is a schema built for the purpose. Sending
+  // them twice would describe one event in two shapes, the second of them in a namespace
+  // that means "a device's own condition".
+  const h = spoolHarness(); await h.ready()
+  const notif = (source) => ({
+    context: 'vessels.self',
+    updates: [{
+      $source: source,
+      timestamp: new Date().toISOString(),
+      values: [{ path: 'notifications.navigation.anchor', value: { state: 'alarm', method: ['sound'], message: 'drag' } }]
+    }]
+  })
+  try {
+    h.deliver(notif('sailkick-boat'))
+    h.deliver(notif('victron.battery')) // …but every OTHER plugin's still flow
+    h.deliver({
+      context: 'vessels.self',
+      updates: [{ $source: 'sailkick-boat', timestamp: new Date().toISOString(), values: [{ path: 'performance.polarSpeedRatio', value: 0.82 }] }]
+    })
+    await delay(400)
+    const out = h.spooled()
+    const ours = out.split('\n').filter((l) => l.startsWith('notifications.') && l.includes('source=sailkick-boat'))
+    assert.deepStrictEqual(ours, [], `our own notification must not be uploaded twice:\n${out}`)
+    assert.match(out, /notifications\.navigation\.anchor\.state.*source=victron\.battery/, "another plugin's notifications are untouched")
+    assert.match(out, /performance\.polarSpeedRatio.*source=sailkick-boat/, 'our non-notification deltas are untouched')
+  } finally { h.s.stop() }
+})

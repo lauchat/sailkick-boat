@@ -378,6 +378,37 @@ one shared path would make each transition overwrite the other's state. Clearing
 `state`/`method`, validated against the SignalK enums (`nominal|normal|alert|warn|alarm|
 emergency`, `visual|sound`).
 
+**Alarms reach the cloud through the telemetry spool.** A transition is written as one
+row of Influx line protocol and handed to the same store-and-forward buffer as every other
+channel, so it inherits what that buffer was built for: ordered, gapless, nothing lost to
+a failed POST or a restart, and an alarm raised mid-ocean arrives when the link does. It
+also makes alarm history queryable afterwards — *when did we drag?* The schema:
+
+```
+alerts,context=vessels.<urn>,self=true,rule=<id>,kind=<kind>
+  raised=1i,transition="raised",state="alarm",message="…",value=111,name="Anchor" <ns>
+```
+
+`rule` and `kind` are the only tags — both bounded and stable, so cardinality stays flat.
+`transition` and `state` are deliberately **fields**: keeping them out of the series key
+means one series per rule, so "is this raised right now" is `last(raised)` on a single
+series rather than a merge-and-compare across two — a query that is easy to get wrong, and
+wrong in the direction of *no alarm*. Feed conditions ride the same measurement under
+`rule=__feed__`. With no cloud account configured, alarms still ring on board and the
+status line says `local only (no cloud sync)` rather than letting you assume otherwise.
+
+Our own notifications are **not** also uploaded through the generic delta path — they
+would arrive a second time as flattened `notifications.*` rows, describing the same event
+in a worse shape in a namespace that means "a device's own condition". Every other
+plugin's notifications (the Victron monitors, the server's own) are untouched.
+
+**Drop anchor** — `POST /api/alerts/anchor {ruleId}` — writes the boat's current fix into
+the rule and arms the watch in the same step. The datum goes into the *rule* because the
+evaluator's in-memory one does not survive a restart or a rule edit, both of which happen
+at anchor; and it is taken from the boat's own fix because that is the position the rule
+will be evaluated against. A browser would send whatever its last telemetry frame said,
+from a socket that may have dropped — which is exactly the moment this matters.
+
 **Rules live on the boat**, in the profile beside routes and polars
 (`/api/profile/alerts`), and that copy is deliberately **not** synced with the cloud. For
 alarms that is the right way round: a rule edited from ashore must not silently change

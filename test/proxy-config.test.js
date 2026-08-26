@@ -244,3 +244,35 @@ test('serveConfig: claims alertsEvaluatedHere when the alert engine is running h
     proxy.stop(); proxy2.stop(); alerts.stop(); up.close()
   }
 })
+
+test('proxy: POST /api/alerts/anchor drops the anchor at the boat\'s own fix', async () => {
+  const { createAlerts } = require('../lib/alerts')
+  const { createProfile } = require('../lib/profile')
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skb-anchor-'))
+  fs.writeFileSync(path.join(dir, 'profile.json'),
+    JSON.stringify({ alerts: [{ id: 'a1', kind: 'anchor-drift', radiusM: 50, forSec: 0 }] }))
+  const profile = createProfile(app, { dataDir: dir })
+  const alerts = createAlerts({ ...app, error () {}, handleMessage () {} }, {
+    source: { getState: () => ({ lat: 43.5, lon: 6.5, updatedAt: new Date().toISOString() }) },
+    profile,
+    profileFile: path.join(dir, 'profile.json')
+  })
+  alerts.start()
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, alerts, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy.start()
+
+  const post = (body) => new Promise((resolve) => {
+    const req = { url: '/api/alerts/anchor', method: 'POST', headers: {}, body }
+    const res = { statusCode: 200, headers: {}, on () {}, setHeader (k, v) { this.headers[k] = v }, writableFinished: false, end (b) { this.body = b || ''; this.writableFinished = true; resolve(this) } }
+    proxy._serveMirror(req, res)
+  })
+  try {
+    const ok = await post({ ruleId: 'a1' })
+    assert.strictEqual(ok.statusCode, 200)
+    assert.deepStrictEqual(JSON.parse(ok.body).anchor, { lat: 43.5, lon: 6.5 })
+    const bad = await post({ ruleId: 'nope' })
+    assert.strictEqual(bad.statusCode, 404, 'an unknown rule is refused, not silently accepted')
+    assert.strictEqual(JSON.parse(bad.body).ok, false)
+  } finally { proxy.stop(); alerts.stop(); up.close() }
+})
