@@ -188,6 +188,21 @@ POST /plugins/sailkick-boat/cache/clear?prefix=tiles/seamap        # nuke one ti
 when clearing — the default keep already does. A hand-typed `find` clear should add
 `! -name history` alongside `! -name tiles ! -name terrain`.)
 
+**A pinned file that was cached wrong stays wrong.** Tiles have no expiry, which is the
+whole point — but it means a bug in the *transport* outlives its fix. The pre-0.23.9
+client stored still-gzipped bytes as if they were the payload (core `http` hands back the
+compressed stream where `fetch` decoded it), and Cesium read the gzip header as a vertex
+count: `Invalid typed array length: 11239580910`. Fixing the transport fixed new fetches
+and nothing else: 2,391 terrain tiles and 188 vector tiles kept throwing for weeks after,
+because nothing ever re-examined a stored file.
+
+So a cache HIT is now checked — two bytes of a buffer already read. A file that claims to
+be quantized-mesh or protobuf and begins `1f 8b` is dropped and re-fetched (`REPAIRED`);
+if the upstream is unreachable the request FAILS rather than serving the poison again,
+because a renderer handed a gzip header errors hard while a missing tile simply falls back
+to its parent. Content that is legitimately gzip — a `.gz` asset, a gzip content-type — is
+left alone: that is a payload, not an encoding.
+
 ## Offline map coverage — global base seed + region prefetch
 On-demand caching only holds what you browsed. To make a usable map exist offline
 *everywhere*, the plugin seeds a worldwide low-zoom base on start and lets you warm a

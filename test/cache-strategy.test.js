@@ -6,7 +6,8 @@ const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
 
-const { getResource } = require('../lib/proxy/cache')
+const fs = require('node:fs')
+const { getResource, storePaths } = require('../lib/proxy/cache')
 
 let seq = 0
 const tmpStore = () => path.join(os.tmpdir(), `sk-strat-${process.pid}-${seq++}`)
@@ -211,4 +212,73 @@ test('a redeployed app shell reaches the boat, and still opens offline', async (
   r = await getResource({ ...opts, timeoutMs: 600 })
   assert.strictEqual(r.cacheState, 'STALE')
   assert.match(r.buffer.toString(), /main-NEW\.js/, 'and the last-seen shell still opens offline')
+})
+
+// --- a pinned tile that was cached COMPRESSED (v0.28.0) ------------------------------
+// The pre-0.23.9 transport stored still-gzipped bytes as if they were the payload; Cesium
+// read the gzip header as a vertex count ("Invalid typed array length: 11239580910").
+// Fixing the transport did not fix the cache: tiles are pinned, so 2,391 terrain tiles and
+// 188 vector tiles on this boat kept throwing for weeks after. Nothing ever re-examined a
+// stored file. Now a HIT is checked — two bytes of a buffer already read.
+const { isCorruptOnDisk } = require('../lib/proxy/cache')
+
+test('cache: recognises gzip bytes stored as a payload, and leaves real gzip alone', () => {
+  const gz = Buffer.from([0x1f, 0x8b, 0x08, 0x00])
+  const mesh = Buffer.from([0x48, 0xad, 0x5d, 0x24])
+  assert.strictEqual(isCorruptOnDisk({ buffer: gz, contentType: 'application/vnd.quantized-mesh' }, '/terrain/8/216/59.terrain'), true)
+  assert.strictEqual(isCorruptOnDisk({ buffer: gz, contentType: 'application/x-protobuf' }, '/tiles/x/1/2/3.pbf'), true)
+  assert.strictEqual(isCorruptOnDisk({ buffer: mesh, contentType: 'application/vnd.quantized-mesh' }, '/terrain/8/216/59.terrain'), false)
+  // …but a gzip FILE is content, not an encoding, and must not be touched.
+  assert.strictEqual(isCorruptOnDisk({ buffer: gz, contentType: 'application/gzip' }, '/assets/dem.gz'), false)
+  assert.strictEqual(isCorruptOnDisk({ buffer: gz, contentType: 'application/octet-stream' }, '/assets/dem.gz'), false)
+  assert.strictEqual(isCorruptOnDisk({ buffer: Buffer.alloc(0), contentType: 'text/plain' }, '/x'), false)
+})
+
+test('cache: a corrupt pinned tile is replaced on the next request, not served again', async () => {
+  const store = tmpStore()
+  let served = 0
+  const up = http.createServer((req, res) => {
+    served++
+    res.setHeader('Content-Type', 'application/vnd.quantized-mesh')
+    res.end(Buffer.from([0x48, 0xad, 0x5d, 0x24, 0x01, 0x02, 0x03, 0x04]))
+  })
+  await new Promise((r) => up.listen(0, r))
+  const upstream = `http://127.0.0.1:${up.address().port}`
+  const reqPath = '/terrain/8/216/59.terrain'
+
+  // plant a poisoned cache entry, exactly as the old transport left them
+  const { file, meta } = storePaths(store, reqPath)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]))
+  fs.writeFileSync(meta, 'application/vnd.quantized-mesh')
+
+  // finally: a failed assertion must not skip up.close() and hang the file — the same
+  // trap that has now bitten three test files in this repo.
+  try {
+    const r = await getResource({ storeDir: store, upstream, reqPath })
+    assert.strictEqual(r.cacheState, 'REPAIRED', 'reported as a repair, not a plain HIT')
+    assert.strictEqual(r.buffer[0], 0x48, 'the clean copy is served')
+    assert.strictEqual(served, 1, 'it went back to the upstream')
+    assert.strictEqual(fs.readFileSync(file)[0], 0x48, 'and the poisoned file is gone from disk')
+
+    // second request is an ordinary HIT again — the repair is not repeated
+    const again = await getResource({ storeDir: store, upstream, reqPath })
+    assert.strictEqual(again.cacheState, 'HIT')
+    assert.strictEqual(served, 1)
+  } finally { up.close() }
+})
+
+test('cache: offline with a corrupt copy FAILS rather than serving the poison again', async () => {
+  // A renderer handed a gzip header errors hard; a missing tile just falls back to its
+  // parent. Failing is the better of the two.
+  const store = tmpStore()
+  const reqPath = '/terrain/5/1/2.terrain'
+  const { file, meta } = storePaths(store, reqPath)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, Buffer.from([0x1f, 0x8b, 0x08, 0x00]))
+  fs.writeFileSync(meta, 'application/vnd.quantized-mesh')
+  await assert.rejects(
+    getResource({ storeDir: store, upstream: 'http://127.0.0.1:1', reqPath }),
+    (e) => e instanceof Error)
+  assert.ok(!fs.existsSync(file), 'the corrupt file is dropped either way, so a later online request repairs it')
 })
