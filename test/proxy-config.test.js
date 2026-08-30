@@ -276,3 +276,48 @@ test('proxy: POST /api/alerts/anchor drops the anchor at the boat\'s own fix', a
     assert.strictEqual(JSON.parse(bad.body).ok, false)
   } finally { proxy.stop(); alerts.stop(); up.close() }
 })
+
+// The sail plan write door (v0.30.0). The boat is the ONLY host that accepts one — the
+// cloud answers 501 sail-write-not-here — because the plan reaches InfluxDB by being
+// published as a SignalK delta here and spooled like every other value.
+test('proxy: POST /api/sails publishes the plan and refuses a non-canonical one', async () => {
+  const { createSails } = require('../lib/sails')
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const sent = []
+  const sails = createSails({ debug () {}, error () {}, handleMessage: (_i, d) => sent.push(...d.updates[0].values) }, {})
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, sails, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy.start()
+  const post = (body) => new Promise((resolve) => {
+    const res = { statusCode: 200, headers: {}, on () {}, setHeader (k, v) { this.headers[k] = v }, writableFinished: false, end (b) { this.body = b || ''; this.writableFinished = true; resolve(this) } }
+    proxy._serveMirror({ url: '/api/sails', method: 'POST', headers: {}, body }, res)
+  })
+  try {
+    const ok = await post({ plan: 'genoa:0+main:2' })
+    assert.strictEqual(ok.statusCode, 200)
+    assert.strictEqual(JSON.parse(ok.body).plan, 'genoa:0+main:2')
+    assert.deepStrictEqual(sent, [{ path: 'sails.plan', value: 'genoa:0+main:2' }], 'published to SignalK')
+
+    const bad = await post({ plan: 'main:2+genoa:0' }) // right sails, wrong order
+    assert.strictEqual(bad.statusCode, 400)
+    assert.strictEqual(JSON.parse(bad.body).code, 'bad-plan')
+    assert.strictEqual(sent.length, 1, 'and nothing more reached the bus')
+  } finally { proxy.stop(); up.close() }
+})
+
+test('serveConfig: claims sailPlanWritable only when this host can publish', async () => {
+  const { createSails } = require('../lib/sails')
+  const up = cloudConfig(); await new Promise((r) => up.listen(0, r))
+  const sails = createSails({ debug () {}, error () {}, handleMessage () {} }, {})
+  const proxy = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, sails, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy.start()
+  const proxy2 = createProxy(app, { sailkickUrl: `http://127.0.0.1:${up.address().port}`, proxyPort: 0, storeDir: tmp(), manifest: { enabled: false }, seed: { enabled: false } })
+  proxy2.start()
+  try {
+    const j = JSON.parse((await callConfig(proxy)).body)
+    assert.strictEqual(j.sailPlanWritable, true, 'the screen becomes writable')
+    assert.strictEqual(j.deployment, 'boat', 'display only — nothing branches on it')
+    // …and without the module the screen must stay read-only rather than offering
+    // controls that silently do nothing.
+    assert.strictEqual(JSON.parse((await callConfig(proxy2)).body).sailPlanWritable, undefined)
+  } finally { proxy.stop(); proxy2.stop(); up.close() }
+})

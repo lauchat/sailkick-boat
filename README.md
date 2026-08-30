@@ -363,6 +363,46 @@ at all. The raw channels are always recorded regardless, so the cloud can recomp
 history if the maths ever changes: the recorded channel is a materialisation, not the only
 truth.
 
+## Sails — the boat is the only writer
+
+Sailkick records every instrument value but has no idea which sails are set, so the polar
+estimator averages a full-main-and-genoa curve together with a three-reefs-and-staysail
+one. Recording the plan as a time series is what will let it tell them apart.
+
+`POST /api/sails {"plan":"genoa:0+main:2"}` publishes an ordinary SignalK delta on
+`sails.plan`, and the gapless spool carries it to the cloud like any other value. The
+**cloud refuses the same request** (`501 sail-write-not-here`), deliberately: one writer
+keeps `<id>_raw` a faithful mirror of the boat's own SignalK, the write is offline-correct
+for free — sail changes happen at sea, which is exactly when the cloud is unreachable —
+and no Influx *write* token has to live in the cloud beside the password hashes.
+
+```
+genoa:0+main:0        full main and full genoa
+main:2+staysail:0     two reefs, staysail, no headsail
+genoa:2+stormjib:0    genoa furled two steps AND the storm jib set
+bare                  nothing up
+```
+
+`<id>:<reefs>` per **set** sail, joined by `+`, **sorted by id**. Any combination is
+expressible, which is the point — a cutter flies genoa and staysail together, heavy
+weather means a partly-furled genoa *and* the storm jib, downwind means twin headsails. A
+fixed slot per station cannot say any of that.
+
+**Sorting is the contract**, so the write door validates by round-tripping through the
+vendored encoder (`shared/engine/sails.js`, pinned by hash) and **refuses** anything
+non-canonical rather than fixing it up. `main:2+genoa:0` names the right sails and hashes
+differently from `genoa:0+main:2`; accepting it would split the polar cloud this feature
+exists to unify — silently, and visible only much later as a mysteriously noisy polar. A
+client sending it is using its own encoder, which is the actual bug.
+
+`bare` rather than an empty string distinguishes "the crew says nothing is up" from "we
+have no sail data", which is null. Under bare poles in a survival storm that difference is
+real.
+
+`/api/config` gains `sailPlanWritable: true` — a **capability**, not a deployment test:
+the dev box runs the cloud server on a LAN and self-hosters run it as their edge, so "am I
+the cloud?" is the wrong question. The screen reads only the capability.
+
 ## Alerts and alarms, evaluated on board
 
 Rules — anchor drag, wind over or under a threshold, a big wind shift, boat speed below

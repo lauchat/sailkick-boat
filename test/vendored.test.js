@@ -57,6 +57,7 @@ test('vendored: every copy declares which app file and commit it came from', () 
     'lib/alerts/great-circle.js',
     'lib/perf/perf-live.js',
     'lib/perf/polar.js',
+    'lib/sails/sails.js',
     'lib/telemetry/signalk-map.js'
   ]
   const found = pins.map((p) => path.relative(path.join(__dirname, '..'), p.file)).sort()

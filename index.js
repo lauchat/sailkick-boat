@@ -12,6 +12,7 @@ const { createAisTargets } = require('./lib/ais/targets')
 const { createProfile } = require('./lib/profile')
 const { createPerf } = require('./lib/perf')
 const { createAlerts } = require('./lib/alerts')
+const { createSails } = require('./lib/sails')
 const { createCloud } = require('./lib/cloud')
 const { resolveAccountConfig } = require('./lib/account')
 
@@ -109,6 +110,7 @@ module.exports = function (app) {
   let cloud = null
   let perf = null
   let alerts = null
+  let sails = null
   let proxyPort = null // what the launcher page needs to build its links
   let pairedSlug = null
   let statusTimer = null
@@ -425,6 +427,16 @@ module.exports = function (app) {
         }
       }
 
+      // The sail-plan write door. No config toggle: it is inert until the crew posts a
+      // plan, and a boat that cannot record its sails is the status quo this fixes.
+      try {
+        sails = createSails(app, { pluginId: plugin.id })
+        pOpts.sails = sails // proxy dispatches POST /api/sails and claims sailPlanWritable
+      } catch (e) {
+        (app.error || console.error)('[sailkick-boat] sails start failed: ' + e.message)
+        sails = null
+      }
+
       if (pOpts.history.enabled !== false) {
         try {
           // ringSource = the telemetry module: when no local InfluxDB token is set
@@ -530,6 +542,7 @@ module.exports = function (app) {
     if (profile) parts.push(profile.status())
     if (perf) parts.push(perf.status())
     if (alerts) parts.push(alerts.status())
+    if (sails) parts.push(sails.status())
     if (ais) parts.push(ais.status())
     if (backfill) parts.push(backfill.status())
     try { app.setPluginStatus(parts.join('   |   ') || 'idle (both features off)') } catch {}
@@ -559,6 +572,7 @@ module.exports = function (app) {
     cloud = null
     perf = null
     alerts = null
+    sails = null
     proxyPort = null
     pairedSlug = null
     proxy = null
