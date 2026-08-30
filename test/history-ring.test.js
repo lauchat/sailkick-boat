@@ -395,3 +395,160 @@ test('history: a malformed from/to falls back to the window rather than erroring
   }
   h.stop()
 })
+
+// --- min/max bands under the mean (v0.29.0) ------------------------------------------
+// The ring used to SNAPSHOT BoatState once per sampleSec, throwing away 14 of every 15
+// readings before anything could ask a question about them. The gusts were gone before a
+// chart saw the data, and no later bucketing could bring them back. Now it polls into an
+// accumulator and emits mean + true extremes. The app measured what that hides: one hour
+// of real sailing at 20 s buckets, mean line spanning 4.8 kt against a true envelope of
+// 8.3 kt — 1.87 kt of spread inside an average bucket, 4.49 kt in the worst.
+const { WRAPPED } = require('../lib/history/ring')
+
+const sailing = (over) => ({
+  sogKt: 6, stwKt: 5.8, cogDeg: 180, headingDeg: 178, awsKt: 14, awaDeg: 40, depthM: 20,
+  twsKt: 12, twdDeg: 218, twaDeg: 40, vmgKt: 4, seaTempC: 19, airTempC: 21,
+  rpmPort: 0, rpmStbd: 0, wptBrgDeg: 300, wptDistNm: 12, wptVmgKt: 3, wptTtgSec: 9000,
+  lat: 43, lon: 6, ...over
+})
+
+test('bands: the extremes BETWEEN emits survive — that is the whole feature', () => {
+  let state = sailing({ sogKt: 6 })
+  const r = new RingHistoryProvider({ source: { getState: () => state }, windowSec: 3600, sampleSec: 99999 })
+  // A gust and a lull inside ONE emit interval. Snapshotting would have kept whichever
+  // reading happened to land on the tick and lost both.
+  for (const v of [6, 9.4, 5.1, 7.2, 6.3]) { state = sailing({ sogKt: v }); r._poll() }
+  r._emit()
+
+  const { series, bands } = r.getSeries({ windowSec: 3600, stats: true })
+  const [, mean] = series.sog[series.sog.length - 1]
+  const [, lo, hi] = bands.sog[bands.sog.length - 1]
+  assert.ok(Math.abs(mean - 6.8) < 0.01, `mean of the interval, not a snapshot (got ${mean})`)
+  assert.strictEqual(lo, 5.1, 'the lull')
+  assert.strictEqual(hi, 9.4, 'the gust')
+  assert.ok(lo < mean && mean < hi, 'the mean sits inside its own envelope')
+  r.destroy()
+})
+
+test('bands: compass channels never get one — mean(359, 1) is 180, the opposite of true', () => {
+  // The error this prevents would look entirely plausible on screen: a wind direction
+  // band drawn across the whole compass, or a heading average pointing astern.
+  let state = sailing({ twdDeg: 359, cogDeg: 359, headingDeg: 359, awaDeg: 179, twaDeg: 179, wptBrgDeg: 359 })
+  const r = new RingHistoryProvider({ source: { getState: () => state }, windowSec: 3600, sampleSec: 99999 })
+  r._poll()
+  state = sailing({ twdDeg: 1, cogDeg: 1, headingDeg: 1, awaDeg: -179, twaDeg: -179, wptBrgDeg: 1 })
+  r._poll(); r._emit()
+
+  const { series, bands } = r.getSeries({ windowSec: 3600, stats: true })
+  for (const c of WRAPPED) {
+    assert.ok(series[c], `${c} still has a line`)
+    assert.strictEqual(bands[c], undefined, `${c} must have NO band`)
+    const last = series[c][series[c].length - 1][1]
+    assert.ok(last === 1 || last === -179, `${c} is the last reading (${last}), never an average`)
+  }
+  // …and the linear channels alongside them do get bands.
+  assert.ok(bands.tws && bands.sog && bands.aws, 'linear channels are unaffected')
+  r.destroy()
+})
+
+test('bands: WRAPPED is exactly the compass set the app uses', () => {
+  // Pinned against sailkick/server/history/ring-provider.js. A channel added to one side
+  // only is how the two providers start disagreeing on the same screen.
+  assert.deepStrictEqual([...WRAPPED].sort(),
+    ['awa', 'cog', 'heading', 'twa', 'twd', 'wptBrg'])
+  for (const c of WRAPPED) assert.ok(CHANNELS.includes(c), `${c} is a real channel`)
+})
+
+test('bands: absent unless asked, and `series` is unchanged either way', () => {
+  let state = sailing({ sogKt: 6 })
+  const r = new RingHistoryProvider({ source: { getState: () => state }, windowSec: 3600, sampleSec: 99999 })
+  r._poll(); state = sailing({ sogKt: 8 }); r._poll(); r._emit()
+
+  const plain = r.getSeries({ windowSec: 3600 })
+  const asked = r.getSeries({ windowSec: 3600, stats: true })
+  assert.strictEqual(plain.bands, undefined, 'no stats, no key at all')
+  assert.deepStrictEqual(asked.series, plain.series, 'the mean line is byte-identical with or without stats')
+  assert.ok(asked.bands.sog, 'and the band is there when asked')
+  r.destroy()
+})
+
+test('bands: `chans` narrows the answer to what is actually plotted', () => {
+  const state = sailing({})
+  const r = new RingHistoryProvider({ source: { getState: () => state }, windowSec: 3600, sampleSec: 99999 })
+  r._sample()
+  const { series, bands } = r.getSeries({ windowSec: 3600, stats: true, chans: ['sog', 'cog'] })
+  assert.deepStrictEqual(Object.keys(series).sort(), ['cog', 'sog'])
+  assert.deepStrictEqual(Object.keys(bands), ['sog'], 'cog is wrapped, so it brings no band')
+  // an unknown name simply matches nothing rather than 500ing
+  assert.deepStrictEqual(r.getSeries({ windowSec: 3600, chans: ['nope'] }).series, {})
+  r.destroy()
+})
+
+test('bands: everySec re-buckets — weighted means, min of mins, buckets labelled at the END', () => {
+  // everySec was ignored outright, so the sheet's 24 h pill returned raw sample-rate
+  // points whatever the pill said. Labelling matters too: the cloud's aggregateWindow
+  // uses timeSrc:"_stop", and labelling at the start would plot the two providers half a
+  // bucket apart on the same screen.
+  const t0 = Math.floor(Date.now() / 60000) * 60000 - 120000 // clean boundary, wholly in the past
+  const r = new RingHistoryProvider({ source: { getState: () => null }, windowSec: 3600, sampleSec: 99999 })
+  r._ring = [
+    { t: t0 + 5000, sog: 6, lo: { sog: 4 }, hi: { sog: 8 }, n: { sog: 10 }, cog: 100 },
+    { t: t0 + 35000, sog: 10, lo: { sog: 9 }, hi: { sog: 14 }, n: { sog: 30 }, cog: 110 },
+    { t: t0 + 65000, sog: 5, lo: { sog: 5 }, hi: { sog: 5 }, n: { sog: 10 }, cog: 120 }
+  ]
+  const { series, bands } = r.getSeries({ windowSec: 3600, everySec: 60, stats: true })
+  assert.strictEqual(series.sog.length, 2, 'three rows fall into two 60 s buckets')
+  assert.strictEqual(series.sog[0][0], t0 + 60000, 'labelled at the END of the bucket')
+  // weighted by n: (6*10 + 10*30) / 40 = 9, NOT the plain mean of 8
+  assert.strictEqual(series.sog[0][1], 9, 'means weighted by the samples behind them')
+  assert.deepStrictEqual(bands.sog[0], [t0 + 60000, 4, 14], 'min of mins, max of maxes')
+  assert.strictEqual(series.cog[0][1], 110, 'a wrapped channel takes the LAST reading in the bucket')
+  r.destroy()
+})
+
+test('bands: an append-log written by an older version still loads and draws', () => {
+  // Rows persisted before this change carry no lo/hi/n. They must yield a degenerate band
+  // (the point value itself) rather than an empty chart or a crash — a boat upgrading
+  // mid-passage keeps its history.
+  const r = new RingHistoryProvider({ source: { getState: () => null }, windowSec: 3600, sampleSec: 99999 })
+  // Anchored inside ONE 60 s bucket. Timestamps relative to `now` straddle a minute
+  // boundary depending on when the suite happens to run — which is exactly how a test
+  // passes alone and fails in the full run.
+  const base = Math.floor(Date.now() / 60000) * 60000 - 60000
+  r._ring = [{ t: base + 5000, sog: 6, cog: 90 }, { t: base + 35000, sog: 8, cog: 92 }] // old shape
+  const { series, bands } = r.getSeries({ windowSec: 3600, everySec: 60, stats: true })
+  assert.ok(series.sog.length === 1, 'old rows still bucket')
+  assert.strictEqual(series.sog[0][1], 7, 'unweighted, because n defaults to 1 each')
+  assert.deepStrictEqual(bands.sog[0].slice(1), [6, 8], 'the band degenerates to the points themselves')
+  r.destroy()
+})
+
+test('bands: a poll with no telemetry emits no row at all', () => {
+  // A row of nulls would be a claim that we looked and the boat had nothing; a gap is the
+  // honest record, and it is what every downstream chart already handles.
+  const r = new RingHistoryProvider({ source: { getState: () => null }, windowSec: 3600, sampleSec: 99999 })
+  r._poll(); r._poll(); r._emit()
+  assert.strictEqual(r._ring.length, 0)
+  assert.deepStrictEqual(r.getSeries({ windowSec: 3600 }).series, {})
+  r.destroy()
+})
+
+test('bands: a compass channel gets no band even if a row carries lo/hi for it', () => {
+  // Three independent things currently stop a bearing growing a band: the accumulator
+  // skips it, the emit writes no lo/hi, and getSeries filters wrapped channels. Removing
+  // the last of those broke no test, because the first two also happen to prevent it —
+  // so this pins it on its own. A row carrying lo/hi for `cog` is not hypothetical: an
+  // append-log written by a future or hand-edited version can hold exactly that.
+  const base = Math.floor(Date.now() / 60000) * 60000 - 60000 // one bucket, whatever the clock says
+  const r = new RingHistoryProvider({ source: { getState: () => null }, windowSec: 3600, sampleSec: 99999 })
+  r._ring = [
+    { t: base + 5000, cog: 359, twd: 359, lo: { cog: 350, twd: 350 }, hi: { cog: 10, twd: 10 }, n: { cog: 5, twd: 5 } },
+    { t: base + 35000, cog: 1, twd: 1, lo: { cog: 350, twd: 350 }, hi: { cog: 10, twd: 10 }, n: { cog: 5, twd: 5 } }
+  ]
+  const { series, bands } = r.getSeries({ windowSec: 3600, everySec: 60, stats: true })
+  assert.ok(series.cog && series.twd, 'the lines are still drawn')
+  assert.strictEqual(bands.cog, undefined, 'never a band on a bearing, whatever the row claims')
+  assert.strictEqual(bands.twd, undefined)
+  assert.strictEqual(series.cog[0][1], 1, 'and the line is the last reading, not an average')
+  r.destroy()
+})

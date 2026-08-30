@@ -727,15 +727,44 @@ cloud, in-memory ring on a DB-less edge*. The boat is a third case — an edge t
 serves the app's history endpoints from its **own** live data:
 ```
 GET /api/history/series?window=3600s&every=30s -> { series: { sog|heading|tws|… : [[tMs,val],…] } }
+GET /api/history/series?…&stats=1&chans=sog,aws -> { series: {…}, bands: { sog: [[t,min,max],…] } }
 GET /api/history/track?window=3600s&every=10s  -> { track: [{ t, lat, lon }, …] }
 GET /api/history/track?from=<epochMs>&to=<epochMs>   (absolute range; ISO also accepted)
 ```
+**Gusts: `stats=1` adds true min/max bands under the mean.** A mean line hides the thing
+you actually want to see — the app measured an hour of real sailing at 20 s buckets where
+the mean spanned 4.8 kt and the true envelope spanned 8.3 kt, with 1.87 kt of spread
+hidden inside an average bucket. That spread only exists if it is *recorded*: the ring
+polls BoatState every second into a per-channel `{sum, cnt, lo, hi}` accumulator and emits
+one row per sample interval carrying the mean plus the true extremes seen inside it. It
+used to snapshot instead, throwing away 14 of every 15 readings before anything could ask
+a question about them — no later bucketing, on the boat or in the browser, can bring those
+back.
+
+A useful side-effect: the auto-coarsening that keeps the ring under `MAX_SAMPLES` is no
+longer lossy. Only the *emit* rate coarsens, never the poll, so a 30-day passage emitting
+every ~52 s still carries the true min/max within each 52 s.
+
+**Compass channels never get a band** — `twd`, `twa`, `awa`, `cog`, `heading`, `wptBrg`.
+The mean of 359° and 1° is 180°, the exact opposite of the truth, so those carry a
+last-reading snapshot and no band, ever. It is the one error here that would look entirely
+plausible on screen, so the tests pin it.
+
+`chans=sog,aws` narrows the answer to the channels actually plotted; `bands` appears only
+when `stats=1` was asked *and* the provider produced them, so every client degrades to the
+plain line. `series` is unchanged with or without either param.
+
 Both endpoints take **either** a trailing `window`, **or** an absolute `from`/`to` —
 which is what the app sends whenever the view is scrolled back in time (the historic
 trail, and a Trends flyout on a past period). The response echoes the `from`/`to` it
 actually served. Before 0.24.0 the boat parsed only `window`, so a request for a past
 hour came back `200` with the **most recent** hour: the historic trail silently showed
-live data. `every` thins a long track and always keeps the first and newest fix.
+live data. `every` thins a long track and always keeps the first and newest fix; on
+`series` it re-buckets (means weighted by the sample count behind each row, extremes as
+min-of-mins), labelling each bucket at its **end** to match the cloud's
+`aggregateWindow(timeSrc: "_stop")` — label them at the start and the two providers plot
+half a bucket apart on the same screen. It is floored so one answer stays under ~3k
+points, as the cloud route does.
 
 Same JSON the cloud returns, so the browser can't tell the difference — but it
 works **offline** with the boat's own data. Only when no telemetry source is

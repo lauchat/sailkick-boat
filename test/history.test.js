@@ -113,3 +113,70 @@ test('proxy: routes /api/history to local history when available, else mirrors',
 
   h.stop(); proxy.stop(); proxy2.stop(); upstream.close()
 })
+
+// The two additive params, end to end through the handler (v0.29.0). The app sends
+// `stats=1&chans=sog,aws,depth` for the mobile sparklines and `stats=1&chans=<one>` for
+// the history sheet and the desktop flyout; a client that sends neither must get exactly
+// what it got before.
+const callSeries = (h, url) => new Promise((resolve) => {
+  const res = capture()
+  res.end = (b) => { res.body = b || ''; res.writableFinished = true; resolve(JSON.parse(res.body)) }
+  h.handleSeries({ url, method: 'GET', headers: {} }, res)
+})
+
+test('history: stats=1 adds bands, and only for channels that can have one', async () => {
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  h._provider()._sample() // a second row, so a bucket has something to span
+
+  const asked = await callSeries(h, '/api/history/series?window=600s&every=60s&stats=1&chans=sog,cog')
+  assert.ok(asked.bands, 'bands present when asked')
+  assert.ok(asked.bands.sog, 'sog is linear — it gets one')
+  assert.strictEqual(asked.bands.cog, undefined, 'cog is a compass bearing — it never does')
+  assert.deepStrictEqual(Object.keys(asked.series).sort(), ['cog', 'sog'], 'chans narrowed the answer')
+  assert.strictEqual(asked.bands.sog[0].length, 3, '[t, min, max]')
+
+  const plain = await callSeries(h, '/api/history/series?window=600s&every=60s&chans=sog,cog')
+  assert.strictEqual(plain.bands, undefined, 'no stats param, no bands key at all')
+  assert.deepStrictEqual(plain.series, asked.series, 'the mean line is the same either way')
+  h.stop()
+})
+
+test('history: `every` is honoured and floored so one answer stays drawable', async () => {
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  const r = await callSeries(h, '/api/history/series?window=3600s&every=60s')
+  assert.strictEqual(r.everySec, 60, 'echoed back')
+
+  // A month-wide absolute range at the default 30 s would be 86,400 points; the floor
+  // brings it back to ~3k, exactly as the cloud route does.
+  const to = Date.now()
+  const from = to - 30 * 86400 * 1000
+  const wide = await callSeries(h, `/api/history/series?from=${from}&to=${to}`)
+  assert.ok(wide.everySec >= Math.ceil((30 * 86400) / 3000), `floored to ${wide.everySec}s`)
+  assert.strictEqual(wide.from, from, 'and the requested range is still what was served')
+  h.stop()
+})
+
+test('history: the route refuses to forward bands the client did not ask for', async () => {
+  // The provider guards this too, so removing the route's own check broke no test. The
+  // contract is the route's: bands appear only when stats was asked AND the provider
+  // produced them, so a provider that always returns them must not leak them.
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  h._provider().getSeries = () => ({ ok: true, series: { sog: [[1, 5]] }, bands: { sog: [[1, 4, 6]] } })
+
+  const plain = await callSeries(h, '/api/history/series?window=600s')
+  assert.strictEqual(plain.bands, undefined, 'not asked for, not forwarded')
+  const asked = await callSeries(h, '/api/history/series?window=600s&stats=1')
+  assert.deepStrictEqual(asked.bands, { sog: [[1, 4, 6]] }, 'asked for, forwarded verbatim')
+  h.stop()
+})
+
+test('history: stats=1 with a provider that cannot produce bands still returns the line', async () => {
+  // "bands may be absent even when asked" — every client degrades to the mean line.
+  const h = createHistory(app, ringOpts(LIVE)); h.start()
+  h._provider().getSeries = () => ({ ok: true, series: { sog: [[1, 5]] } })
+  const r = await callSeries(h, '/api/history/series?window=600s&stats=1')
+  assert.strictEqual(r.ok, true)
+  assert.deepStrictEqual(r.series.sog, [[1, 5]])
+  assert.strictEqual(r.bands, undefined)
+  h.stop()
+})
