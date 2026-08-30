@@ -785,10 +785,22 @@ A useful side-effect: the auto-coarsening that keeps the ring under `MAX_SAMPLES
 longer lossy. Only the *emit* rate coarsens, never the poll, so a 30-day passage emitting
 every ~52 s still carries the true min/max within each 52 s.
 
-**Compass channels never get a band** — `twd`, `twa`, `awa`, `cog`, `heading`, `wptBrg`.
-The mean of 359° and 1° is 180°, the exact opposite of the truth, so those carry a
-last-reading snapshot and no band, ever. It is the one error here that would look entirely
-plausible on screen, so the tests pin it.
+**Compass channels are circular-meaned and never get a band** — `twd`, `twa`, `awa`,
+`cog`, `heading`, `wptBrg`. The *arithmetic* mean of 359° and 1° is 180°, the exact
+opposite of the truth, so these use the unit-vector mean `atan2(Σsin, Σcos)` instead: a
+genuine average with no seam. A min/max stays meaningless on a circle, so they carry no
+band, ever — the one error here that would look entirely plausible on screen.
+
+Two things the tests pin hard. **`twa` and `awa` stay signed, −180..180**, port negative,
+because that is what the number means; a circular mean returns 0..360, so they are folded
+back — without it a port-side wind reads as 270°, which is not a rounding difference but a
+different quantity. (Pinned as a fuzzed invariant, not two examples.) And **readings that
+cancel report nothing rather than north**: two exactly opposite bearings have no average,
+and `atan2(0, 0)` answers 0° with total confidence.
+
+Before 0.31.0 these channels served the last reading in each bucket — correct, but one
+sample per bucket, and the emit rate coarsens to ~52 s on a 30-day passage, so a direction
+trace was visibly jumpier aboard than ashore for the same minute.
 
 `chans=sog,aws` narrows the answer to the channels actually plotted; `bands` appears only
 when `stats=1` was asked *and* the provider produced them, so every client degrades to the

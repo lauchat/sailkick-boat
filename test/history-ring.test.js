@@ -430,7 +430,9 @@ test('bands: the extremes BETWEEN emits survive — that is the whole feature', 
   r.destroy()
 })
 
-test('bands: compass channels never get one — mean(359, 1) is 180, the opposite of true', () => {
+const SIGNED_CHANS = new Set(['twa', 'awa'])
+
+test('bands: compass channels never get a BAND — a min/max on a circle is meaningless', () => {
   // The error this prevents would look entirely plausible on screen: a wind direction
   // band drawn across the whole compass, or a heading average pointing astern.
   let state = sailing({ twdDeg: 359, cogDeg: 359, headingDeg: 359, awaDeg: 179, twaDeg: 179, wptBrgDeg: 359 })
@@ -443,8 +445,12 @@ test('bands: compass channels never get one — mean(359, 1) is 180, the opposit
   for (const c of WRAPPED) {
     assert.ok(series[c], `${c} still has a line`)
     assert.strictEqual(bands[c], undefined, `${c} must have NO band`)
-    const last = series[c][series[c].length - 1][1]
-    assert.ok(last === 1 || last === -179, `${c} is the last reading (${last}), never an average`)
+    // Since v0.31.0 the line is the CIRCULAR mean, not the last reading — a genuine
+    // average with no seam. 359 and 1 average to 0, never to 180.
+    const v = series[c][series[c].length - 1][1]
+    const expect = SIGNED_CHANS.has(c) ? 180 : 0
+    assert.ok(Math.abs(Math.abs(v) - expect) < 1 || Math.abs(Math.abs(v) - 360) < 1,
+      `${c} = ${v}: expected the circular mean (~${expect}), never the arithmetic 180`)
   }
   // …and the linear channels alongside them do get bands.
   assert.ok(bands.tws && bands.sog && bands.aws, 'linear channels are unaffected')
@@ -502,7 +508,9 @@ test('bands: everySec re-buckets — weighted means, min of mins, buckets labell
   // weighted by n: (6*10 + 10*30) / 40 = 9, NOT the plain mean of 8
   assert.strictEqual(series.sog[0][1], 9, 'means weighted by the samples behind them')
   assert.deepStrictEqual(bands.sog[0], [t0 + 60000, 4, 14], 'min of mins, max of maxes')
-  assert.strictEqual(series.cog[0][1], 110, 'a wrapped channel takes the LAST reading in the bucket')
+  // v0.31.0: a wrapped channel is circular-meaned over the bucket, not point-sampled.
+  // mean(100, 110) = 105; the third row (120) falls in the next bucket.
+  assert.strictEqual(series.cog[0][1], 105, 'a wrapped channel is circular-meaned over the bucket')
   r.destroy()
 })
 
@@ -549,6 +557,135 @@ test('bands: a compass channel gets no band even if a row carries lo/hi for it',
   assert.ok(series.cog && series.twd, 'the lines are still drawn')
   assert.strictEqual(bands.cog, undefined, 'never a band on a bearing, whatever the row claims')
   assert.strictEqual(bands.twd, undefined)
-  assert.strictEqual(series.cog[0][1], 1, 'and the line is the last reading, not an average')
+  assert.ok(Math.abs(series.cog[0][1]) < 1 || Math.abs(series.cog[0][1] - 360) < 1,
+    `the line is the circular mean of 359 and 1 (${series.cog[0][1]}), not the arithmetic 180`)
   r.destroy()
+})
+
+// --- circular mean for wrapped channels (v0.31.0) ------------------------------------
+// v0.29.0 refused to average a bearing and served the last reading in each bucket:
+// correct, but one sample per bucket — and on a long passage the emit rate coarsens to
+// ~52 s, so a direction trace would be one reading per 52 s where the cloud averages
+// every sample. The circular mean (atan2(Σsin, Σcos)) is a genuine average AND has no
+// seam, so it is what both providers now use.
+const { circularMeanDeg, wrap180: aWrap180 } = require('../lib/history/angles')
+
+const dirState = (deg, signed = deg) => ({
+  twsKt: 12, twdDeg: deg, cogDeg: deg, headingDeg: deg, wptBrgDeg: deg,
+  twaDeg: signed, awaDeg: signed, awsKt: 10, sogKt: 5
+})
+function ringOfDirs (states) {
+  let st = states[0]
+  const r = new RingHistoryProvider({ source: { getState: () => st }, windowSec: 3600, sampleSec: 99999 })
+  for (const s of states) { st = s; r._poll() }
+  r._emit()
+  return r
+}
+
+test('circular mean: 359 and 1 average to ~0, never to 180', () => {
+  // The failure this replaces: the arithmetic mean of 359 and 1 is 180 — the exact
+  // reciprocal, a wind reported as coming from precisely the opposite direction.
+  const r = ringOfDirs([dirState(359), dirState(1), dirState(359)])
+  const row = r._ring[r._ring.length - 1]
+  for (const c of ['twd', 'cog', 'heading', 'wptBrg']) {
+    assert.ok(Math.abs(row[c] - 359.667) < 0.01, `${c} = ${row[c]}, expected ~359.67`)
+  }
+  r.destroy()
+})
+
+test('circular mean: TWA and AWA STAY signed, -180..180 — anything else is nonsense', () => {
+  // The trap: a circular mean returns 0..360, so a port-side wind would read as 270°
+  // instead of -90°. These two channels mean "off the bow, port negative"; an absolute
+  // bearing in that field is not a rounding difference, it is a different quantity.
+  const port = ringOfDirs([dirState(0, -90), dirState(0, -90)])
+  const row = port._ring[port._ring.length - 1]
+  assert.ok(Math.abs(row.twa + 90) < 0.01, `twa = ${row.twa}, expected ~-90 (port), NOT 270`)
+  assert.ok(Math.abs(row.awa + 90) < 0.01, `awa = ${row.awa}`)
+  port.destroy()
+
+  // Dead astern from both sides averages to ±180, not to 0 (head to wind).
+  const astern = ringOfDirs([dirState(0, 177), dirState(0, -177), dirState(0, 177)])
+  const a = astern._ring[astern._ring.length - 1]
+  assert.ok(Math.abs(Math.abs(a.twa) - 179) < 1.5, `twa = ${a.twa}, expected ~±179, NOT ~0`)
+  astern.destroy()
+})
+
+test('circular mean: the signed range is an INVARIANT, fuzzed — never 0..360', () => {
+  // Pinned as a property rather than a couple of examples: whatever the input, twa/awa
+  // come back within ±180 and the absolute bearings within 0..360. A single missing
+  // rewrap() would put a port wind at 270° on every screen that reads it.
+  let seed = 12345
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+  for (let trial = 0; trial < 200; trial++) {
+    const states = []
+    for (let i = 0; i < 1 + Math.floor(rnd() * 8); i++) {
+      states.push(dirState(rnd() * 360, rnd() * 360 - 180))
+    }
+    const r = ringOfDirs(states)
+    const row = r._ring[r._ring.length - 1]
+    for (const c of ['twa', 'awa']) {
+      if (row[c] == null) continue
+      assert.ok(row[c] >= -180 && row[c] <= 180, `trial ${trial}: ${c} = ${row[c]} is outside -180..180`)
+    }
+    for (const c of ['twd', 'cog', 'heading', 'wptBrg']) {
+      if (row[c] == null) continue
+      assert.ok(row[c] >= 0 && row[c] < 360.0005, `trial ${trial}: ${c} = ${row[c]} is outside 0..360`)
+    }
+    // …and the served series keeps the same invariant through re-bucketing.
+    const { series } = r.getSeries({ windowSec: 3600, everySec: 60 })
+    for (const c of ['twa', 'awa']) {
+      for (const [, v] of series[c] || []) assert.ok(v >= -180 && v <= 180, `${c} served as ${v}`)
+    }
+    r.destroy()
+  }
+})
+
+test('circular mean: readings that cancel report NOTHING, not north', () => {
+  // atan2(0, 0) is 0 — due north, stated with total confidence. Two exactly opposite
+  // bearings have no meaningful average, so the channel gaps instead.
+  const r = ringOfDirs([dirState(0), dirState(180)])
+  const row = r._ring[r._ring.length - 1]
+  assert.strictEqual(row.twd, null)
+  assert.strictEqual(row.cog, null)
+  assert.strictEqual(circularMeanDeg([0, 180]), null, 'and the helper agrees')
+  r.destroy()
+})
+
+test('circular mean: re-bucketing across the seam averages, and old rows still work', () => {
+  const base = Math.floor(Date.now() / 60000) * 60000 - 120000
+  const r = new RingHistoryProvider({ source: { getState: () => null }, windowSec: 3600, sampleSec: 99999 })
+  // Rows in the OLD shape (no lo/hi/n) straddling north, all in one 60 s bucket.
+  r._ring = [
+    { t: base + 5000, cog: 359, twa: 179 },
+    { t: base + 25000, cog: 1, twa: -179 },
+    { t: base + 45000, cog: 359, twa: 179 }
+  ]
+  const { series } = r.getSeries({ windowSec: 3600, everySec: 60 })
+  assert.strictEqual(series.cog.length, 1, 'one bucket')
+  assert.ok(Math.abs(series.cog[0][1] - 359.667) < 0.01, `cog re-bucketed to ${series.cog[0][1]}, expected ~359.67`)
+  assert.ok(Math.abs(Math.abs(series.twa[0][1]) - 179.666) < 0.01, `twa = ${series.twa[0][1]}, expected ~±179.67`)
+  assert.ok(series.twa[0][1] >= -180 && series.twa[0][1] <= 180)
+  r.destroy()
+})
+
+test('circular mean: wrapped channels still carry NO band', () => {
+  // Averaging them is now fine; a min/max still is not — "the lowest bearing in this
+  // minute" is meaningless on a circle.
+  const r = ringOfDirs([dirState(10), dirState(350)])
+  const { series, bands } = r.getSeries({ windowSec: 3600, everySec: 60, stats: true })
+  assert.ok(series.cog, 'the line is there')
+  for (const c of ['twd', 'twa', 'awa', 'cog', 'heading', 'wptBrg']) {
+    assert.strictEqual(bands[c], undefined, `${c} must have no band`)
+  }
+  assert.ok(bands.sog && bands.aws, 'linear channels are unaffected')
+  r.destroy()
+})
+
+test('vendored: angles.js agrees with the wrap180 the ring already had', () => {
+  // The app keeps wrap180 duplicated in perf-live.js and angles.js so each stays a
+  // single-file vendor, and fuzzes the two against each other. Same discipline here.
+  const { wrap180: perfWrap180 } = require('../lib/perf/perf-live')
+  for (let d = -1080; d <= 1080; d += 0.5) {
+    assert.strictEqual(aWrap180(d), perfWrap180(d), `wrap180(${d}) disagrees between the two copies`)
+  }
 })

@@ -55,6 +55,7 @@ test('vendored: every copy declares which app file and commit it came from', () 
   const expected = [
     'lib/alerts/alerts.js',
     'lib/alerts/great-circle.js',
+    'lib/history/angles.js',
     'lib/perf/perf-live.js',
     'lib/perf/polar.js',
     'lib/sails/sails.js',
