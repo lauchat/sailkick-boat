@@ -282,3 +282,45 @@ test('cache: offline with a corrupt copy FAILS rather than serving the poison ag
     (e) => e instanceof Error)
   assert.ok(!fs.existsSync(file), 'the corrupt file is dropped either way, so a later online request repairs it')
 })
+
+// --- /sw.js must track deploys (v0.31.1) ---------------------------------------------
+// The mobile app is a PWA whose service worker answers mobile.html and its assets from
+// its OWN cache, before any request reaches this mirror. The browser installs a new
+// worker only when sw.js's bytes differ from the installed one — so sw.js is the single
+// un-hashed file that IS the update signal, and serving a stale one freezes the whole
+// mobile shell however fresh our copy of mobile.html is.
+
+test('freshness: /sw.js is treated as an entry document, not an immutable asset', () => {
+  assert.strictEqual(isNetworkFirst('/sw.js'), true, 'fresh when online')
+  assert.strictEqual(isEntryDocument('/sw.js'), true)
+  assert.strictEqual(isNetworkFirst('/sw.js?v=2'), true, 'query string does not change it')
+  // …while the hashed assets it precaches stay pinned, which is the whole point: a new
+  // sw.js names new hashed files, and those are ordinary cache misses.
+  assert.strictEqual(isNetworkFirst('/assets/mobile-DSOGnCjw.js'), false)
+  assert.strictEqual(isNetworkFirst('/tiles/bathy/5/1/2.png'), false)
+})
+
+test('freshness: a redeployed sw.js reaches the phone without waiting for a bake', async () => {
+  // Before this, the new bytes arrived only when the cache-manifest happened to announce
+  // an `app` change — a best-effort 5-minute poller standing between a deploy and every
+  // phone aboard. Now the file itself is re-checked on each load.
+  const storeDir = tmpStore()
+  let body = "const BUILD = 'mobile-AAAAAAAA';"
+  const up = http.createServer((req, res) => { res.setHeader('Content-Type', 'application/javascript'); res.end(body) })
+  await listen(up)
+  const upstream = `http://127.0.0.1:${up.address().port}`
+  try {
+    const first = await getResource({ storeDir, upstream, reqPath: '/sw.js', networkFirst: isNetworkFirst('/sw.js') })
+    assert.match(first.buffer.toString(), /mobile-AAAAAAAA/)
+
+    body = "const BUILD = 'mobile-BBBBBBBB';" // a deploy, with no manifest change at all
+    const second = await getResource({ storeDir, upstream, reqPath: '/sw.js', networkFirst: isNetworkFirst('/sw.js') })
+    assert.match(second.buffer.toString(), /mobile-BBBBBBBB/, 'the phone sees the new worker')
+    assert.strictEqual(second.cacheState, 'LIVE')
+  } finally { up.close() }
+
+  // …and offline it still serves the cached copy, so the app opens with no uplink.
+  const offline = await getResource({ storeDir, upstream: 'http://127.0.0.1:1', reqPath: '/sw.js', networkFirst: true })
+  assert.strictEqual(offline.cacheState, 'STALE')
+  assert.match(offline.buffer.toString(), /mobile-BBBBBBBB/)
+})

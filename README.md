@@ -203,6 +203,16 @@ because a renderer handed a gzip header errors hard while a missing tile simply 
 to its parent. Content that is legitimately gzip — a `.gz` asset, a gzip content-type — is
 left alone: that is a payload, not an encoding.
 
+**`/sw.js` is network-first too**, and it is the sharpest case. The mobile app is a PWA
+whose service worker answers `mobile.html` and its assets from its *own* cache — before
+the request ever reaches this mirror — and the browser installs a new worker only when
+`sw.js`'s bytes change. So `sw.js` is the one un-hashed file that *is* the update signal:
+serve a stale one and the whole mobile shell freezes, however fresh the copy of
+`mobile.html` in the store happens to be. (Strictly it was never pinned *forever* — the
+manifest's `app` family invalidates it whenever the app's sha changes — but making the
+shell's update depend on a best-effort 5-minute poller is exactly the dependency the
+entry-document rule exists to remove.)
+
 ## Offline map coverage — global base seed + region prefetch
 On-demand caching only holds what you browsed. To make a usable map exist offline
 *everywhere*, the plugin seeds a worldwide low-zoom base on start and lets you warm a
