@@ -677,3 +677,50 @@ test('drop anchor: an explicit position is honoured (re-setting the datum by han
     { lat: 40.1, lon: -3.2 })
   h.a.stop()
 })
+
+// --- a frozen field must not be evaluated as live (v0.32.0) --------------------------
+test('integration: a wind alarm cannot fire on a dead wind instrument', async () => {
+  // Before per-field freshness this was the dangerous case: a rule armed at 25 kt kept
+  // seeing the last live reading forever, so it could neither fire nor clear on reality.
+  // With the field absent the shared evaluator's own semantics take over — "cannot tell"
+  // — which never clears a raised alarm and never raises a new one on dead data.
+  const { createTelemetry } = require('../lib/telemetry')
+  const t = createTelemetry({ debug () {}, error () {} }, { fieldTtlSec: 1 })
+  const feed = (tws) => t._ingest({
+    context: 'vessels.self',
+    updates: [{
+      timestamp: new Date().toISOString(),
+      values: [
+        { path: 'navigation.position', value: { latitude: 43, longitude: 6 } },
+        ...(tws == null ? [] : [{ path: 'environment.wind.speedTrue', value: tws }])
+      ]
+    }]
+  })
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sk-frozen-${process.pid}-`))
+  fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({
+    alerts: [{ id: 'w1', kind: 'wind-above', twsKt: 25, forSec: 0, clearSec: 0 }]
+  }))
+  const sent = []
+  const a = createAlerts({ debug () {}, error () {}, handleMessage: (_i, d) => sent.push(...d.updates[0].values) },
+    { source: t, profileFile: path.join(dir, 'profile.json') })
+  a.start()
+
+  feed(10) // 19.4 kt — under the threshold
+  a._tick()
+  assert.strictEqual(a.active().length, 0)
+
+  await new Promise((res) => setTimeout(res, 1200)) // the wind instrument dies
+  feed(null)
+  a._tick()
+  assert.strictEqual(a.active().length, 0, 'nothing fires on a field that is no longer there')
+  assert.strictEqual(sent.length, 0, 'and nothing reached the bus')
+
+  // A distinct millisecond: the host only re-evaluates when the sample's OWN timestamp
+  // advances (that is what makes a frozen feed detectable), and two feeds inside one
+  // millisecond look like the same sample — which made this test flaky, not wrong.
+  await new Promise((res) => setTimeout(res, 5))
+  feed(15) // 29 kt — a real gust, once the instrument is back
+  a._tick()
+  assert.ok(a.active().includes('w1'), 'a live reading still arms the alarm normally')
+  a.stop(); t.stop()
+})

@@ -372,7 +372,12 @@ module.exports = function (app) {
 
       if (p.serveTelemetry !== false) {
         try {
-          telemetry = createTelemetry(app, {})
+          // fieldTtlSec is a hand-editable escape hatch, not a config field: the right
+          // value follows from the bus's publish cadence, which the owner has no way to
+          // judge. Measured on this boat, every path feeding BoatState arrives at ~1 Hz
+          // (worst gap 2.8 s), so the 15 s default is ~7x margin. A boat whose SignalK is
+          // configured on-change, or with a slow NMEA0183 source, can raise it here.
+          telemetry = createTelemetry(app, { fieldTtlSec: p.fieldTtlSec })
           telemetry.start()
           pOpts.telemetryUpgrade = (req, sock, head) => telemetry.handleUpgrade(req, sock, head)
         } catch (e) {

@@ -689,3 +689,38 @@ test('vendored: angles.js agrees with the wrap180 the ring already had', () => {
     assert.strictEqual(aWrap180(d), perfWrap180(d), `wrap180(${d}) disagrees between the two copies`)
   }
 })
+
+// --- a dead instrument must reach the ring as a GAP (v0.32.0) -------------------------
+// End to end, because this is where the lie was visible: the ring polls getState() every
+// second, so a frozen field became real samples and the circular/arithmetic mean of N
+// identical readings is that reading — a dead-flat plateau with a zero-width band, which
+// reads as "rock steady". Observed on the boat: the sounder lost the bottom, stopped
+// publishing, and the ring recorded 224.85 m for an hour while the cloud showed a gap.
+const { createTelemetry } = require('../lib/telemetry')
+
+test('integration: when one instrument dies the ring gaps that channel and keeps the rest', async () => {
+  const t = createTelemetry({ debug () {}, error () {} }, { fieldTtlSec: 1 })
+  const feed = (withDepth) => t._ingest({
+    context: 'vessels.self',
+    updates: [{
+      timestamp: new Date().toISOString(),
+      values: [
+        { path: 'navigation.position', value: { latitude: 43, longitude: 6 } },
+        { path: 'navigation.speedOverGround', value: 2.5 },
+        ...(withDepth ? [{ path: 'environment.depth.belowSurface', value: 224.85 }] : [])
+      ]
+    }]
+  })
+  // pollSec too: the ring's own 1 Hz poll timer would otherwise sample across the sleep
+  // below and race the TTL boundary, making this test flaky rather than wrong.
+  const r = new RingHistoryProvider({ source: t, windowSec: 3600, sampleSec: 99999, pollSec: 99999 })
+  feed(true); r._poll(); r._emit() // the sounder is alive
+  await new Promise((res) => setTimeout(res, 1200)) // …then it goes quiet
+  feed(false); r._poll(); r._emit()
+  feed(false); r._poll(); r._emit()
+
+  const { series } = r.getSeries({ windowSec: 3600 })
+  assert.strictEqual(series.depth.length, 1, 'one real sample, then nothing — a gap, not a plateau')
+  assert.strictEqual(series.sog.length, 3, 'the instruments still publishing are unaffected')
+  r.destroy(); t.stop()
+})

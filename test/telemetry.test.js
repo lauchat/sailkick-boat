@@ -519,3 +519,111 @@ test('telemetry: upstream handles the SAME-delta case on its own', () => {
   ]))
   assert.ok(Math.abs(t._state().wptDistNm - 2049.48) < 0.01, 'great circle wins within one delta too')
 })
+
+// --- per-field freshness: a dead instrument is a GAP, not a frozen value (v0.32.0) ----
+// The accumulated state merged every delta and nothing ever expired, so when ONE
+// instrument died while others kept publishing, its fields froze at their last value
+// while `updatedAt` stayed fresh — and every consumer treated dead data as live.
+// Observed on the boat: the sounder lost the bottom in deep water, stopped publishing,
+// and the ring recorded 224.85 m every 15 s for an hour with a zero-width band, while
+// the cloud (which stores only real updates) showed an honest gap for the same hour.
+const POS = (lat, lon) => ({ path: 'navigation.position', value: { latitude: lat, longitude: lon } })
+const fixed = (over = {}) => createTelemetry({ debug () {}, error () {} }, { fieldTtlSec: 1, ...over })
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+test('freshness: a field that stops arriving disappears; the ones still arriving do not', async () => {
+  const t = fixed()
+  t._ingest(delta([POS(43, 6), { path: 'environment.depth.belowSurface', value: 224.85 }, { path: 'navigation.speedOverGround', value: 2.5 }]))
+  assert.strictEqual(t.getState().depthM, 224.85, 'present while it is arriving')
+
+  await sleep(1200) // past the TTL, with only the OTHER instruments still publishing
+  t._ingest(delta([POS(43.001, 6), { path: 'navigation.speedOverGround', value: 2.6 }]))
+  const s = t.getState()
+  assert.ok(!('depthM' in s), 'the dead sounder is absent, not frozen at 224.85')
+  assert.ok(Number.isFinite(s.sogKt) && Number.isFinite(s.lat), 'the live instruments are untouched')
+  assert.ok(s.updatedAt, 'whole-feed staleness is still the app\'s job, so updatedAt always rides along')
+  t.stop()
+})
+
+test('freshness: the field returns on the first fresh delta, not after a warm-up', async () => {
+  const t = fixed()
+  t._ingest(delta([POS(43, 6), { path: 'environment.wind.speedTrue', value: 10 }]))
+  await sleep(1200)
+  t._ingest(delta([POS(43, 6)]))
+  assert.ok(!('twsKt' in t.getState()), 'gone while the wind instrument is quiet')
+  t._ingest(delta([{ path: 'environment.wind.speedTrue', value: 11 }]))
+  assert.ok(Number.isFinite(t.getState().twsKt), 'back immediately when it speaks again')
+  t.stop()
+})
+
+test('freshness: a position expires WHOLE — half a fix is not a fix', () => {
+  const t = fixed()
+  t._ingest(delta([POS(43, 6), { path: 'navigation.speedOverGround', value: 2 }]))
+  assert.ok('lat' in t.getState() && 'lon' in t.getState())
+  // Force one half stale: the grouping rule, not the clock, is what is under test here.
+  t._seenAt().lon = Date.now() - 999999
+  const s = t.getState()
+  assert.ok(!('lat' in s) && !('lon' in s), 'both halves go, so the anchor watch cannot watch a frozen fix')
+  assert.ok(Number.isFinite(s.sogKt), 'and nothing else is affected')
+  t.stop()
+})
+
+test('freshness: headingDeg is COMPUTED, so its freshness comes from its inputs', () => {
+  // It never appears in a patch. Without an explicit rule it would either never expire —
+  // the frozen-heading bug surviving the fix — or expire always.
+  const t = fixed()
+  t._ingest(delta([POS(43, 6),
+    { path: 'navigation.headingMagnetic', value: 1.5 },
+    { path: 'navigation.magneticVariation', value: 0.28 }]))
+  assert.ok(Number.isFinite(t.getState().headingDeg), 'compass + variation gives a true heading')
+
+  // The compass dies but variation keeps arriving (they come from different devices).
+  t._seenAt().hdgMagDeg = Date.now() - 999999
+  assert.ok(!('headingDeg' in t.getState()), 'no compass ⇒ no heading, rather than a frozen one')
+
+  // …and a published true heading is the other way to be fresh.
+  t._ingest(delta([{ path: 'navigation.headingTrue', value: 1.6 }]))
+  assert.ok(Number.isFinite(t.getState().headingDeg), 'headingTrue alone keeps it alive')
+  t.stop()
+})
+
+test('freshness: getState, the update broadcast and the hello frame are the SAME view', () => {
+  // A field the ring records but the screen omits (or the reverse) is the same class of
+  // bug as the freeze itself.
+  const t = fixed()
+  t._ingest(delta([POS(43, 6), { path: 'environment.depth.belowSurface', value: 30 }]))
+  t._seenAt().depthM = Date.now() - 999999
+  const viaGet = t.getState()
+  const viaEmit = t._publicState()
+  assert.deepStrictEqual(Object.keys(viaGet).sort(), Object.keys(viaEmit).sort())
+  assert.ok(!('depthM' in viaGet) && !('depthM' in viaEmit))
+  t.stop()
+})
+
+test('freshness: normal sailing does not flicker at the measured cadence', async () => {
+  // The regression the TTL measurement exists to prevent. Every path that feeds BoatState
+  // on this boat arrives at ~1 Hz (worst observed inter-sample gap 2.8 s), and the
+  // subscription is fixed-period, so unchanged values keep arriving too.
+  const t = createTelemetry({ debug () {}, error () {} }, { fieldTtlSec: 15 })
+  for (let i = 0; i < 5; i++) {
+    t._ingest(delta([POS(43, 6),
+      { path: 'environment.water.temperature', value: 292 },   // slow-ish, unchanging
+      { path: 'propulsion.port.revolutions', value: 0 },       // engine at rest, still published
+      { path: 'navigation.speedOverGround', value: 2.5 }]))
+    await sleep(120)
+  }
+  const s = t.getState()
+  for (const f of ['seaTempC', 'rpmPort', 'sogKt', 'lat', 'lon']) {
+    assert.ok(f in s, `${f} must not flicker while it is still being published`)
+  }
+  t.stop()
+})
+
+test('freshness: the raw accumulator is never mutated — filtering happens on read', () => {
+  const t = fixed()
+  t._ingest(delta([POS(43, 6), { path: 'environment.depth.belowSurface', value: 30 }]))
+  t._seenAt().depthM = Date.now() - 999999
+  assert.ok(!('depthM' in t.getState()), 'hidden from consumers')
+  assert.strictEqual(t._rawState().depthM, 30, 'but still remembered, so a returning sensor needs no re-seed')
+  t.stop()
+})

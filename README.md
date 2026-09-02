@@ -513,6 +513,44 @@ dead feed is exactly a timestamp that stops moving). The two are reconciled by b
 the skew: a SignalK clock more than a minute from system time falls back to system time
 with one warning, rather than reporting a permanent phantom "feed stale".
 
+## A dead instrument is a gap, not a frozen value
+
+The telemetry state accumulates every SignalK delta into one object, so without care
+nothing in it ever expires. When **one** instrument dies while the others keep publishing,
+its fields freeze at their last value while `updatedAt` stays fresh — and every consumer
+treats dead data as live.
+
+This is not hypothetical. In deep water the sounder loses the bottom and simply stops
+publishing. Measured on this boat: for the hour after it went quiet the cloud (which
+stores only real updates) showed an honest **gap**, while the boat's ring recorded
+`224.85 m` every 15 seconds — a dead-flat plateau, and with min/max bands a **zero-width
+envelope**, which is the most confident possible rendering of an instrument that is not
+there. Two stories about the same hour; the plateau is the lie.
+
+So every field carries the time it was last patched, and the published view omits anything
+older than `fieldTtlSec` (default 15 s). Downstream this needs no cooperation: the ring
+records nothing so the series gaps, the app's `Number.isFinite` guards show `—`, and the
+alert evaluator's own "cannot tell" semantics take over — which never clears a raised
+alarm and never raises a new one on dead data. A returning instrument reappears on its
+first fresh delta; the internal state is never mutated, only filtered on read.
+
+Two cases needed more than a timestamp:
+
+- **A position expires whole.** `lat`/`lon` arrive as one `navigation.position` value, half
+  a fix is not a fix, and an anchor watch must not watch a frozen one.
+- **`headingDeg` is computed**, not patched — it never appears in a delta, so its freshness
+  is derived from its inputs (compass + variation, or a published true heading). Without
+  that rule it would never expire, which is the frozen-heading bug surviving the fix.
+
+**The TTL is measured, not guessed.** Every path that feeds BoatState on this boat arrives
+at ~1 Hz with a worst observed inter-sample gap of 2.8 s, so 15 s is about seven times the
+worst case. Crucially the subscription is fixed-period (`{ path: '*', period: 1000 }`) and
+the server republishes unchanged values — `navigation.magneticVariation`,
+`navigation.gnss.satellites` and `propulsion.port.runTime` all arrive at 1 Hz with 100%
+repeated values — so a healthy-but-constant instrument (an engine at rest publishing
+`rpm 0`) keeps arriving and does not expire. A boat configured on-change could differ,
+which is why `proxy.fieldTtlSec` can be raised by hand.
+
 ## Two paths, one reading
 
 Source priorities solve *several devices on one path*. There is a second, separate case:
